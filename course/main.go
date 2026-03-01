@@ -111,6 +111,57 @@ func main() {
 		c.JSON(http.StatusOK, course)
 	})
 
+	// อัพเดท course
+	r.PUT("/courses/:id", func(c *gin.Context) {
+		id := c.Param("id")
+
+		var body struct {
+			Subject      *string  `json:"subject"`
+			Credit       *int     `json:"credit"`
+			Section      []string `json:"section"`
+			DayOfWeek    *string  `json:"day_of_week"`
+			StartTime    *string  `json:"start_time"`
+			EndTime      *string  `json:"end_time"`
+			Capacity     *int     `json:"capacity"`
+			State        *string  `json:"state"`
+			Prerequisite *string  `json:"prerequisite"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON body: " + err.Error()})
+			return
+		}
+
+		_, err := conn.Exec(context.Background(),
+			`UPDATE "Course" SET
+				"subject"      = COALESCE($1, "subject"),
+				"credit"       = COALESCE($2, "credit"),
+				"section"      = COALESCE($3, "section"),
+				"day_of_week"  = COALESCE($4, "day_of_week"),
+				"start_time"   = COALESCE($5::TIME, "start_time"),
+				"end_time"     = COALESCE($6::TIME, "end_time"),
+				"capacity"     = COALESCE($7, "capacity"),
+				"state"        = COALESCE($8, "state"),
+				"prerequisite" = COALESCE($9, "prerequisite")
+			WHERE "course_id" = $10`,
+			body.Subject,
+			body.Credit,
+			body.Section,
+			body.DayOfWeek,
+			body.StartTime,
+			body.EndTime,
+			body.Capacity,
+			body.State,
+			body.Prerequisite,
+			id,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update course: " + err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Course updated successfully"})
+	})
+
 	r.Run(":8000") // รันที่ localhost:8000
 
 	fmt.Println("Course Service started on port 8000") // เช็ค
