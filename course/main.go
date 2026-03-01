@@ -49,6 +49,7 @@ func main() {
 
 	r := gin.Default()
 
+	// ดึง course ออกมาทั้งหมด
 	r.GET("/courses", func(c *gin.Context) {
 		rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "prerequisite" FROM "Course"`)
 		if err != nil {
@@ -80,6 +81,34 @@ func main() {
 		}
 
 		c.JSON(http.StatusOK, courses)
+	})
+
+	// ดึง course ตัวเดียว
+	r.GET("/courses/:id", func(c *gin.Context) {
+		id := c.Param("id")
+
+		var course Course
+		err := conn.QueryRow(context.Background(),
+			`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "prerequisite" FROM "Course" WHERE "course_id" = $1`,
+			id,
+		).Scan(
+			&course.CourseID,
+			&course.Subject,
+			&course.Credit,
+			&course.Section,
+			&course.DayOfWeek,
+			&course.StartTime,
+			&course.EndTime,
+			&course.Capacity,
+			&course.State,
+			&course.Prerequisite,
+		)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+			return
+		}
+
+		c.JSON(http.StatusOK, course)
 	})
 
 	r.Run(":8000") // รันที่ localhost:8000
