@@ -162,6 +162,68 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Course updated successfully"})
 	})
 
+	// เพิ่มข้อมูล course
+	r.POST("/courses", func(c *gin.Context) {
+		var body struct {
+			CourseID     int      `json:"course_id"      binding:"required"`
+			Subject      string   `json:"subject"        binding:"required"`
+			Credit       int      `json:"credit"         binding:"required"`
+			Section      []string `json:"section"        binding:"required"`
+			DayOfWeek    string   `json:"day_of_week"    binding:"required"`
+			StartTime    string   `json:"start_time"     binding:"required"`
+			EndTime      string   `json:"end_time"       binding:"required"`
+			Capacity     int      `json:"capacity"       binding:"required"`
+			State        string   `json:"state"          binding:"required"`
+			Prerequisite *string  `json:"prerequisite"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON body: " + err.Error()})
+			return
+		}
+
+		_, err := conn.Exec(context.Background(),
+			`INSERT INTO "Course" ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "prerequisite")
+			VALUES ($1, $2, $3, $4, $5, $6::TIME, $7::TIME, $8, $9, $10)`,
+			body.CourseID,
+			body.Subject,
+			body.Credit,
+			body.Section,
+			body.DayOfWeek,
+			body.StartTime,
+			body.EndTime,
+			body.Capacity,
+			body.State,
+			body.Prerequisite,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create course: " + err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusCreated, gin.H{"message": "Course created successfully"})
+	})
+
+	// ลบข้อมูล course
+	r.DELETE("/courses/:id", func(c *gin.Context) {
+		id := c.Param("id")
+
+		result, err := conn.Exec(context.Background(),
+			`DELETE FROM "Course" WHERE "course_id" = $1`,
+			id,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete course: " + err.Error()})
+			return
+		}
+
+		if result.RowsAffected() == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Course deleted successfully"})
+	})
+
 	r.Run(":8000") // รันที่ localhost:8000
 
 	fmt.Println("Course Service started on port 8000") // เช็ค
