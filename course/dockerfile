@@ -1,0 +1,26 @@
+# ---- Build Stage ----
+FROM golang:alpine AS builder
+
+WORKDIR /app
+
+# Copy go.mod และ go.sum จาก root ก่อน (layer caching)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code ของ course service
+COPY course/ ./course/
+
+# Build binary
+RUN go build -o course-service ./course/main.go
+
+# ---- Run Stage ----
+FROM alpine:latest
+
+WORKDIR /app
+
+# Copy binary จาก build stage
+COPY --from=builder /app/course-service .
+
+EXPOSE 8000
+
+CMD ["./course-service"]

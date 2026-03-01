@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_DB: register
+    volumes:
+      - ./course/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./course/db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d register"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  course-service:
+    build:
+      context: .
+      dockerfile: course/dockerfile
+    container_name: course-service
+    environment:
+      DB_HOST: postgres
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

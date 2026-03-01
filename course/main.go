@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +15,11 @@ import (
 
 // เชื่อม database ใน postgres
 func connectToDB() *pgx.Conn {
-	connStr := "user=postgres password=1234 host=localhost port=5432 dbname=register sslmode=disable"
+	host := os.Getenv("DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
 	conn, err := pgx.Connect(context.Background(), connStr)
 	if err != nil {
 		log.Fatal("Unable to connect to database:", err)
