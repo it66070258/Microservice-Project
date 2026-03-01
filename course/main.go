@@ -1,16 +1,18 @@
 package main
 
+// dependency
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 )
 
+// เชื่อม database ใน postgres
 func connectToDB() *pgx.Conn {
 	connStr := "user=postgres password=1234 host=localhost port=5432 dbname=register sslmode=disable"
 	conn, err := pgx.Connect(context.Background(), connStr)
@@ -27,35 +29,61 @@ func connectToDB() *pgx.Conn {
 	return conn
 }
 
+// สร้างประเภทตัวแปร
 type Course struct {
 	CourseID     int       `json:"course_id"`
 	Subject      string    `json:"subject"`
 	Credit       int       `json:"credit"`
-	Section      string    `json:"section"`
+	Section      []string  `json:"section"`
 	DayOfWeek    string    `json:"day_of_week"`
 	StartTime    time.Time `json:"start_time"`
 	EndTime      time.Time `json:"end_time"`
 	Capacity     int       `json:"capacity"`
 	State        string    `json:"state"`
-	Prerequisite string    `json:"prerequisite"`
-}
-
-func getCourses(w http.ResponseWriter, r *http.Request) {
-	courses := []Course{
-		{CourseID: 1, Subject: "Mathematics", Credit: 3, Section: "1", DayOfWeek: "Monday", StartTime: time.Date(0, 1, 1, 9, 0, 0, 0, time.UTC), EndTime: time.Date(0, 1, 1, 12, 0, 0, 0, time.UTC), Capacity: 30, State: "open", Prerequisite: ""},
-		{CourseID: 2, Subject: "Physics", Credit: 3, Section: "1", DayOfWeek: "Tuesday", StartTime: time.Date(0, 1, 1, 13, 0, 0, 0, time.UTC), EndTime: time.Date(0, 1, 1, 16, 0, 0, 0, time.UTC), Capacity: 30, State: "open", Prerequisite: "Mathematics"},
-		{CourseID: 3, Subject: "Computer Science", Credit: 3, Section: "1", DayOfWeek: "Wednesday", StartTime: time.Date(0, 1, 1, 9, 0, 0, 0, time.UTC), EndTime: time.Date(0, 1, 1, 13, 0, 0, 0, time.UTC), Capacity: 80, State: "open", Prerequisite: ""},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(courses)
-	fmt.Println("Endpoint Hit: returnAllcourses")
+	Prerequisite *string   `json:"prerequisite"`
 }
 
 func main() {
 	conn := connectToDB()
 	defer conn.Close(context.Background())
 
-	http.HandleFunc("/courses", getCourses)
-	fmt.Println("Course Service started on port 8000")
-	log.Fatal(http.ListenAndServe(":8000", nil))
+	r := gin.Default()
+
+	r.GET("/courses", func(c *gin.Context) {
+		rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "prerequisite" FROM "Course"`)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query courses: " + err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		var courses []Course
+		for rows.Next() {
+			var course Course
+			err := rows.Scan(
+				&course.CourseID,
+				&course.Subject,
+				&course.Credit,
+				&course.Section,
+				&course.DayOfWeek,
+				&course.StartTime,
+				&course.EndTime,
+				&course.Capacity,
+				&course.State,
+				&course.Prerequisite,
+			)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan course: " + err.Error()})
+				return
+			}
+			courses = append(courses, course)
+		}
+
+		c.JSON(http.StatusOK, courses)
+	})
+
+	r.Run(":8000") // รันที่ localhost:8000
+
+	fmt.Println("Course Service started on port 8000") // เช็ค
+
 }
