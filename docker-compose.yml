@@ -31,5 +31,18 @@ services:
       postgres:
         condition: service_healthy
 
+student-service:
+    build:
+      context: ./student
+      dockerfile: Dockerfile
+    container_name: student-service
+    environment:
+      DB_HOST: postgres
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
