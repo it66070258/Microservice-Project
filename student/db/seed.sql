@@ -1,0 +1,6 @@
+INSERT INTO "Student" ("student_id", "first_name", "last_name", "email", "password", "birthdate", "gender", "year_level", "graded_subject") VALUES
+(1, 'Somchai',  'Rakdee',    'somchai.r@example.com', '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2003-05-12', 'Male',   1, ARRAY['Mathematics']),
+(2, 'Nattaya',  'Srisuwan',  'nattaya.s@example.com', '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2002-08-24', 'Female', 2, ARRAY['Mathematics', 'Physics']),
+(3, 'Wichai',   'Pornpan',   'wichai.p@example.com',  '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2003-01-30', 'Male',   1, ARRAY['Computer Science']),
+(4, 'Siriporn', 'Kaewmala',  'siriporn.k@example.com', '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2001-11-05', 'Female', 3, ARRAY['Mathematics', 'Physics', 'Computer Science']),
+(5, 'Anuwat',   'Thongsuk',  'anuwat.t@example.com',  '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2002-03-17', 'Male',   2, ARRAY['Computer Science']);
