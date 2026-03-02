@@ -49,10 +49,7 @@ type Course struct {
 	Prerequisite   []string  `json:"prerequisite"`
 }
 
-func main() {
-	conn := connectToDB()
-	defer conn.Close(context.Background())
-
+func SetupRouter(conn *pgx.Conn) *gin.Engine {
 	r := gin.Default()
 
 	// ดึง course ออกมาทั้งหมด
@@ -140,7 +137,7 @@ func main() {
 			return
 		}
 
-		_, err := conn.Exec(context.Background(),
+		result, err := conn.Exec(context.Background(),
 			`UPDATE "Course" SET
 				"subject"         = COALESCE($1, "subject"),
 				"credit"          = COALESCE($2, "credit"),
@@ -167,6 +164,10 @@ func main() {
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update course: " + err.Error()})
+			return
+		}
+		if result.RowsAffected() == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
 			return
 		}
 
@@ -237,8 +238,15 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Course deleted successfully"})
 	})
 
+	return r
+}
+
+func main() {
+	conn := connectToDB()
+	defer conn.Close(context.Background())
+
+	r := SetupRouter(conn)
 	r.Run(":8000") // รันที่ localhost:8000
 
 	fmt.Println("Course Service started on port 8000") // เช็ค
-
 }

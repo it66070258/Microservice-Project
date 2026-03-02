@@ -20,8 +20,8 @@ services:
 
   course-service:
     build:
-      context: .
-      dockerfile: course/dockerfile
+      context: ./course
+      dockerfile: dockerfile
     container_name: course-service
     environment:
       DB_HOST: postgres

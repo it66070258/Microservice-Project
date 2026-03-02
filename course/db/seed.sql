@@ -1,4 +1,19 @@
 INSERT INTO "Course" ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite") VALUES
-(1, 'Mathematics',      3, ARRAY['1', '2'], 'Monday',    '09:00:00', '12:00:00', 30, 'open', ARRAY['3'],   NULL),
-(2, 'Physics',          3, ARRAY['1', '3'], 'Tuesday',   '13:00:00', '16:00:00', 30, 'open', ARRAY['1'],   ARRAY['Mathematics']),
-(3, 'Computer Science', 3, ARRAY['1'],      'Wednesday', '09:00:00', '13:00:00', 80, 'open', ARRAY['2'],   NULL);
+(1,  'Mathematics',            3, ARRAY['1', '2', '3'],    'Monday',    '09:00:00', '12:00:00', 30,  'open',   ARRAY['3'],         NULL),
+(2,  'Physics',                3, ARRAY['1', '3'],    'Tuesday',   '13:00:00', '16:00:00', 30,  'open',   ARRAY['1'],         ARRAY['Mathematics']),
+(3,  'Computer Science',       3, ARRAY['1'],         'Wednesday', '09:00:00', '13:00:00', 80,  'open',   ARRAY['2'],         NULL),
+(4,  'Calculus',               4, ARRAY['1', '2'],    'Monday',    '13:00:00', '17:00:00', 40,  'open',   NULL,               ARRAY['Mathematics']),
+(5,  'Linear Algebra',         3, ARRAY['1'],         'Thursday',  '09:00:00', '12:00:00', 35,  'open',   NULL,               ARRAY['Mathematics']),
+(6,  'Chemistry',              3, ARRAY['1', '2'],    'Friday',    '09:00:00', '12:00:00', 40,  'open',   ARRAY['4', '5'],    NULL),
+(7,  'Biology',                3, ARRAY['1'],         'Tuesday',   '09:00:00', '12:00:00', 50,  'open',   ARRAY['6'],         NULL),
+(8,  'Data Structures',        3, ARRAY['1', '2'],    'Wednesday', '13:00:00', '16:00:00', 60,  'open',   ARRAY['7', '8'],    ARRAY['Computer Science']),
+(9,  'Algorithms',             3, ARRAY['1'],         'Thursday',  '13:00:00', '16:00:00', 50,  'open',   ARRAY['9'],         ARRAY['Data Structures']),
+(10, 'Database Systems',       3, ARRAY['1', '2'],    'Friday',    '13:00:00', '16:00:00', 45,  'open',   ARRAY['10'],        ARRAY['Computer Science']),
+(11, 'Operating Systems',      3, ARRAY['1'],         'Monday',    '13:00:00', '16:00:00', 40,  'closed', ARRAY['11', '12'],  ARRAY['Computer Science']),
+(12, 'Networking',             3, ARRAY['1', '2'],    'Tuesday',   '09:00:00', '12:00:00', 35,  'open',   NULL,               ARRAY['Computer Science']),
+(13, 'Machine Learning',       4, ARRAY['1'],         'Wednesday', '09:00:00', '13:00:00', 30,  'open',   ARRAY['13'],        ARRAY['Linear Algebra', 'Calculus']),
+(14, 'Statistics',             3, ARRAY['1', '2'],    'Thursday',  '09:00:00', '12:00:00', 55,  'open',   ARRAY['14'],        ARRAY['Mathematics']),
+(15, 'Discrete Mathematics',   3, ARRAY['1'],         'Friday',    '09:00:00', '12:00:00', 40,  'open',   NULL,               NULL),
+(16, 'Software Engineering',   3, ARRAY['1', '2'],    'Monday',    '09:00:00', '12:00:00', 45,  'open',   ARRAY['15'],        ARRAY['Computer Science']),
+(17, 'Computer Architecture',  3, ARRAY['1', '3'],         'Tuesday',   '13:00:00', '16:00:00', 35,  'closed', ARRAY['16', '17'],  ARRAY['Operating Systems']),
+(18, 'Artificial Intelligence',4, ARRAY['1'],         'Thursday',  '13:00:00', '17:00:00', 30,  'open',   ARRAY['18'],        ARRAY['Machine Learning']);
