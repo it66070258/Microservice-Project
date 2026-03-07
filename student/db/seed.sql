@@ -1,4 +1,4 @@
-INSERT INTO "Student" ("student_id", "first_name", "last_name", "email", "password", "birthdate", "gender", "year_level", "graded_subject") VALUES
+INSERT INTO student (student_id, first_name, last_name, email, password, birthdate, gender, year_level, graded_subject) VALUES
 (1, 'Somchai',  'Rakdee',    'somchai.r@example.com', '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2003-05-12', 'Male',   1, ARRAY['Mathematics']),
 (2, 'Nattaya',  'Srisuwan',  'nattaya.s@example.com', '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2002-08-24', 'Female', 2, ARRAY['Mathematics', 'Physics']),
 (3, 'Wichai',   'Pornpan',   'wichai.p@example.com',  '$2a$14$dCqGf/Nr0aOog7Xyn02s9uRy/kwwMEiYJBcMyZgUTMAobbkXTC31q', '2003-01-30', 'Male',   1, ARRAY['Computer Science']),

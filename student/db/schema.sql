@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS "Student" (
+CREATE TABLE IF NOT EXISTS student (
 	"student_id" INTEGER NOT NULL UNIQUE,
 	"first_name" VARCHAR(255) NOT NULL,
 	"last_name" VARCHAR(255) NOT NULL,
