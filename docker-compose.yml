@@ -9,6 +9,10 @@ services:
     volumes:
       - ./course/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
       - ./course/db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+      - ./enrollment/db/schema.sql:/docker-entrypoint-initdb.d/03_schema.sql
+      - ./enrollment/db/seed.sql:/docker-entrypoint-initdb.d/04_seed.sql
+      - ./student/db/schema.sql:/docker-entrypoint-initdb.d/05_schema.sql
+      - ./student/db/seed.sql:/docker-entrypoint-initdb.d/06_seed.sql
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
@@ -31,10 +35,10 @@ services:
       postgres:
         condition: service_healthy
 
-student-service:
+  student-service:
     build:
       context: ./student
-      dockerfile: Dockerfile
+      dockerfile: dockerfile
     container_name: student-service
     environment:
       DB_HOST: postgres
@@ -44,5 +48,20 @@ student-service:
       postgres:
         condition: service_healthy
 
+  enrollment-service:
+    build:
+      context: ./enrollment
+      dockerfile: dockerfile
+    container_name: enrollment-service
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: "1234"
+      DB_NAME: register
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        
 volumes:
   postgres_data:
