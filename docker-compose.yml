@@ -55,13 +55,11 @@ services:
     container_name: enrollment-service
     environment:
       DB_HOST: postgres
-      DB_PASSWORD: "1234"
-      DB_NAME: register
     ports:
-      - "8080:8080"
+      - "8002:8002"
     depends_on:
       postgres:
         condition: service_healthy
-        
+
 volumes:
   postgres_data:
