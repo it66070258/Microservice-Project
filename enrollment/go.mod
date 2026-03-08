@@ -3,9 +3,10 @@ module Microservice-Project
 go 1.25.0
 
 require (
-	github.com/eapache/go-resiliency v1.7.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/lib/pq v1.11.2
+	github.com/rabbitmq/amqp091-go v1.10.0
+	github.com/sony/gobreaker v1.0.0
 )
 
 require (

@@ -7,12 +7,6 @@ services:
       POSTGRES_PASSWORD: "1234"
       POSTGRES_DB: register
     volumes:
-      - ./course/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
-      - ./course/db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
-      - ./enrollment/db/schema.sql:/docker-entrypoint-initdb.d/03_schema.sql
-      - ./enrollment/db/seed.sql:/docker-entrypoint-initdb.d/04_seed.sql
-      - ./student/db/schema.sql:/docker-entrypoint-initdb.d/05_schema.sql
-      - ./student/db/seed.sql:/docker-entrypoint-initdb.d/06_seed.sql
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
@@ -22,31 +16,17 @@ services:
       timeout: 5s
       retries: 5
 
-  course-service:
-    build:
-      context: ./course
-      dockerfile: dockerfile
-    container_name: course-service
-    environment:
-      DB_HOST: postgres
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
     ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  student-service:
-    build:
-      context: ./student
-      dockerfile: dockerfile
-    container_name: student-service
-    environment:
-      DB_HOST: postgres
-    ports:
-      - "8001:8001"
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   enrollment-service:
     build:
@@ -55,10 +35,13 @@ services:
     container_name: enrollment-service
     environment:
       DB_HOST: postgres
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
     ports:
       - "8002:8002"
     depends_on:
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
 volumes:

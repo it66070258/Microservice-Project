@@ -1,28 +1,30 @@
 # ---- Build Stage ----
-FROM golang:1.25-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-# Copy go.mod และ go.sum เพื่อทำการ download dependencies ก่อน (ช่วยให้ build เร็วขึ้นในครั้งต่อไป)
+# ติดตั้ง git เนื่องจากบาง library ใน go mod ต้องใช้
+RUN apk add --no-cache git
+
+# คัดลอกเฉพาะไฟล์ mod ก่อนเพื่อทำ caching layer
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code for enrollment service
+# คัดลอกโค้ดที่เหลือ
 COPY . .
 
-# Build binary and name it enrollment-service
+# Build เป็น binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o enrollment-service .
 
-# ---- Run Stage (ตัวจริงที่จะเอาไปใช้งาน) ----
+# ---- Run Stage ----
 FROM alpine:latest
 
 WORKDIR /app
 
-# Copy binary from builder stage
+# คัดลอก binary มาจาก stage builder
 COPY --from=builder /app/enrollment-service .
 
-# Enrollment service listens on port 8080
-EXPOSE 8080
+# เปิดพอร์ตให้ตรงกับ Gin (8002)
+EXPOSE 8002
 
-# สั่งรันไฟล์
 CMD ["./enrollment-service"]
