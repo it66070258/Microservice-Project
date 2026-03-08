@@ -3,17 +3,14 @@ package main
 // dependency
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"github.com/rabbitmq/amqp091-go"
 )
 
 // เชื่อม database ใน postgres
@@ -247,79 +244,6 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 func main() {
 	conn := connectToDB()
 	defer conn.Close(context.Background())
-
-	connMQ, err := amqp091.Dial("amqp://guest:guest@localhost:5672/")
-	if err != nil {
-		log.Fatal(err)
-	}
-	ch, err := connMQ.Channel()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer ch.Close()
-	defer connMQ.Close()
-
-	_, err = ch.QueueDeclare(
-		"course_updates",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	go func() {
-		msgs, err := ch.Consume(
-			"course_updates",
-			"",
-			true,
-			false,
-			false,
-			false,
-			nil,
-		)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for d := range msgs {
-			var msg struct {
-				CourseID  int    `json:"course_id"`
-				StudentID int    `json:"student_id"`
-				Action    string `json:"action"`
-			}
-			err := json.Unmarshal(d.Body, &msg)
-			if err != nil {
-				log.Printf("Failed to unmarshal message: %v", err)
-				continue
-			}
-			if msg.Action == "enroll" {
-				// update current_student
-				_, err = conn.Exec(context.Background(), `UPDATE "Course" SET "current_student" = array_append("current_student", $1) WHERE "course_id" = $2`, strconv.Itoa(msg.StudentID), msg.CourseID)
-				if err != nil {
-					log.Printf("Failed to update current_student: %v", err)
-					continue
-				}
-				// check capacity
-				var current []string
-				var capacity int
-				err = conn.QueryRow(context.Background(), `SELECT "current_student", "capacity" FROM "Course" WHERE "course_id" = $1`, msg.CourseID).Scan(&current, &capacity)
-				if err != nil {
-					log.Printf("Failed to get current data: %v", err)
-					continue
-				}
-				if len(current) >= capacity {
-					_, err = conn.Exec(context.Background(), `UPDATE "Course" SET "state" = 'closed' WHERE "course_id" = $1`, msg.CourseID)
-					if err != nil {
-						log.Printf("Failed to update state: %v", err)
-					}
-				}
-			}
-		}
-	}()
 
 	r := SetupRouter(conn)
 	r.Run(":8000") // รันที่ localhost:8000
