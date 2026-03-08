@@ -54,7 +54,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 
 	// ดึง course ออกมาทั้งหมด
 	r.GET("/courses", func(c *gin.Context) {
-		rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM "Course"`)
+		rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course`)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query courses: " + err.Error()})
 			return
@@ -93,7 +93,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 
 		var course Course
 		err := conn.QueryRow(context.Background(),
-			`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM "Course" WHERE "course_id" = $1`,
+			`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course WHERE "course_id" = $1`,
 			id,
 		).Scan(
 			&course.CourseID,
@@ -138,7 +138,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		}
 
 		result, err := conn.Exec(context.Background(),
-			`UPDATE "Course" SET
+			`UPDATE course SET
 				"subject"         = COALESCE($1, "subject"),
 				"credit"          = COALESCE($2, "credit"),
 				"section"         = COALESCE($3, "section"),
@@ -149,7 +149,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 				"state"           = COALESCE($8, "state"),
 				"current_student" = COALESCE($9, "current_student"),
 				"prerequisite"    = COALESCE($10, "prerequisite")
-			WHERE "course_id" = $11`,
+			WHERE course_id = $11`,
 			body.Subject,
 			body.Credit,
 			body.Section,
@@ -195,7 +195,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		}
 
 		_, err := conn.Exec(context.Background(),
-			`INSERT INTO "Course" ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite")
+			`INSERT INTO course ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite")
 			VALUES ($1, $2, $3, $4, $5, $6::TIME, $7::TIME, $8, $9, $10, $11)`,
 			body.CourseID,
 			body.Subject,
@@ -222,7 +222,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		id := c.Param("id")
 
 		result, err := conn.Exec(context.Background(),
-			`DELETE FROM "Course" WHERE "course_id" = $1`,
+			`DELETE FROM course WHERE course_id = $1`,
 			id,
 		)
 		if err != nil {

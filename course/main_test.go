@@ -36,12 +36,33 @@ func TestMain(m *testing.M) {
 // ---- Reset DB ----
 
 func resetDB() {
-	_, err := testConn.Exec(context.Background(), `TRUNCATE TABLE "Course" RESTART IDENTITY CASCADE`)
+	// Ensure schema exists so tests can run against a clean database.
+	_, err := testConn.Exec(context.Background(), `
+		CREATE TABLE IF NOT EXISTS course (
+			"course_id" INTEGER NOT NULL UNIQUE,
+			"subject" VARCHAR(255) NOT NULL,
+			"credit" INTEGER NOT NULL,
+			"section" VARCHAR(255) ARRAY NOT NULL,
+			"day_of_week" VARCHAR(255) NOT NULL,
+			"start_time" TIME NOT NULL,
+			"end_time" TIME NOT NULL,
+			"capacity" INTEGER NOT NULL,
+			"state" VARCHAR(255) NOT NULL,
+			"current_student" VARCHAR(255) ARRAY,
+			"prerequisite" VARCHAR(255) ARRAY,
+			PRIMARY KEY("course_id")
+		);
+	`)
+	if err != nil {
+		log.Fatal("Failed to ensure schema:", err)
+	}
+
+	_, err = testConn.Exec(context.Background(), `TRUNCATE TABLE course RESTART IDENTITY CASCADE`)
 	if err != nil {
 		log.Fatal("Failed to truncate:", err)
 	}
 	_, err = testConn.Exec(context.Background(), `
-		INSERT INTO "Course" ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite") VALUES
+		INSERT INTO course ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite") VALUES
 		(1, 'Mathematics',      3, ARRAY['1', '2'], 'Monday',    '09:00:00', '12:00:00', 30, 'open', ARRAY['3'],   NULL),
 		(2, 'Physics',          3, ARRAY['1', '3'], 'Tuesday',   '13:00:00', '16:00:00', 30, 'open', ARRAY['1'],   ARRAY['Mathematics']),
 		(3, 'Computer Science', 3, ARRAY['1'],      'Wednesday', '09:00:00', '13:00:00', 80, 'open', ARRAY['2'],   NULL)
@@ -134,7 +155,7 @@ func TestCreateCourse_Success(t *testing.T) {
 	assert.Equal(t, "Course created successfully", resp["message"])
 
 	var count int
-	testConn.QueryRow(context.Background(), `SELECT COUNT(*) FROM "Course"`).Scan(&count)
+	testConn.QueryRow(context.Background(), `SELECT COUNT(*) FROM course`).Scan(&count)
 	assert.Equal(t, 4, count)
 }
 
@@ -174,7 +195,7 @@ func TestUpdateCourse_Success(t *testing.T) {
 	assert.Equal(t, "Course updated successfully", resp["message"])
 
 	var state string
-	testConn.QueryRow(context.Background(), `SELECT "state" FROM "Course" WHERE "course_id" = 1`).Scan(&state)
+	testConn.QueryRow(context.Background(), `SELECT "state" FROM course WHERE course_id = 1`).Scan(&state)
 	assert.Equal(t, "closed", state)
 }
 
@@ -210,7 +231,7 @@ func TestDeleteCourse_Success(t *testing.T) {
 	assert.Equal(t, "Course deleted successfully", resp["message"])
 
 	var count int
-	testConn.QueryRow(context.Background(), `SELECT COUNT(*) FROM "Course"`).Scan(&count)
+	testConn.QueryRow(context.Background(), `SELECT COUNT(*) FROM course`).Scan(&count)
 	assert.Equal(t, 2, count)
 }
 

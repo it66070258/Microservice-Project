@@ -87,7 +87,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		}
 
 		_, err = conn.Exec(context.Background(),
-			`INSERT INTO "Student" (student_id, first_name, last_name, email, password, birthdate, gender, year_level, graded_subject) 
+			`INSERT INTO student (student_id, first_name, last_name, email, password, birthdate, gender, year_level, graded_subject) 
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			s.StudentID, s.FirstName, s.LastName, s.Email, hashedPassword, s.Birthdate, s.Gender, s.YearLevel, s.GradedSubject,
 		)
@@ -112,7 +112,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		var studentID int
 		var dbPassword string
 		err := conn.QueryRow(context.Background(),
-			`SELECT student_id, password FROM "Student" WHERE email = $1`, loginData.Email).Scan(&studentID, &dbPassword)
+			`SELECT student_id, password FROM student WHERE email = $1`, loginData.Email).Scan(&studentID, &dbPassword)
 
 		if err != nil || !checkPasswordHash(loginData.Password, dbPassword) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Email หรือ Password ไม่ถูกต้อง"})
@@ -141,7 +141,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			var s Student
 			err := conn.QueryRow(context.Background(),
 				`SELECT student_id, first_name, last_name, email, birthdate, gender, year_level, graded_subject 
-				 FROM "Student" WHERE student_id = $1`, userID).Scan(
+				 FROM student WHERE student_id = $1`, userID).Scan(
 				&s.StudentID, &s.FirstName, &s.LastName, &s.Email, &s.Birthdate, &s.Gender, &s.YearLevel, &s.GradedSubject,
 			)
 			if err != nil {
@@ -160,7 +160,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			}
 
 			_, err := conn.Exec(context.Background(),
-				`UPDATE "Student" SET first_name=$1, last_name=$2, birthdate=$3, gender=$4, year_level=$5 WHERE student_id=$6`,
+				`UPDATE student SET first_name=$1, last_name=$2, birthdate=$3, gender=$4, year_level=$5 WHERE student_id=$6`,
 				up.FirstName, up.LastName, up.Birthdate, up.Gender, up.YearLevel, userID,
 			)
 			if err != nil {
