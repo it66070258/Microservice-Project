@@ -41,10 +41,11 @@ var cb *breaker.Breaker
 
 func main() {
 	var err error
-	host := getEnv("DB_HOST", "localhost")
-	password := getEnv("DB_PASSWORD", "password")
-	dbname := getEnv("DB_NAME", "micro")
-	connStr := fmt.Sprintf("host=%s port=5432 user=postgres password=%s dbname=%s sslmode=disable", host, password, dbname) // adjust as needed
+	host := os.Getenv("DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host) // adjust as needed
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
@@ -56,14 +57,7 @@ func main() {
 	r := gin.Default()
 	r.GET("/health", healthHandler)
 	r.POST("/enroll", enrollHandler)
-	r.Run()
-}
-
-func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
+	r.Run(":8002")
 }
 
 func healthHandler(c *gin.Context) {

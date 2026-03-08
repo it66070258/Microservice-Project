@@ -44,8 +44,7 @@ func connectToDB() *pgx.Conn {
 	if host == "" {
 		host = "localhost"
 	}
-	
-	connStr := fmt.Sprintf("user=postgres password=password host=%s port=5432 dbname=register sslmode=disable", host)
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
 	conn, err := pgx.Connect(context.Background(), connStr)
 	if err != nil {
 		log.Fatal("Unable to connect to database:", err)
@@ -112,7 +111,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 
 		var studentID int
 		var dbPassword string
-		err := conn.QueryRow(context.Background(), 
+		err := conn.QueryRow(context.Background(),
 			`SELECT student_id, password FROM "Student" WHERE email = $1`, loginData.Email).Scan(&studentID, &dbPassword)
 
 		if err != nil || !checkPasswordHash(loginData.Password, dbPassword) {
@@ -180,7 +179,7 @@ func main() {
 	defer conn.Close(context.Background())
 
 	r := SetupRouter(conn)
-	
+
 	port := ":8001" // แยกพอร์ตเป็น 8001 ไม่ให้ชนกับ Course
 	fmt.Printf("Student Service started on port %s\n", port)
 	r.Run(port)
