@@ -1,0 +1,73 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database (Master - สำหรับ Write)
+  postgres-master:
+    image: postgres:15-alpine
+    container_name: course-postgres-master
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: register
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - course-network
+
+  # PostgreSQL Replica (สำหรับ Read - ใน demo นี้ใช้ master เดียวกัน)
+  # ในการใช้งานจริงจะต้อง setup replication
+  postgres-replica:
+    image: postgres:15-alpine
+    container_name: course-postgres-replica
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: register
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-replica-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - course-network
+
+  # Course Service
+  course-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: course-service
+    environment:
+      DB_READ_HOST: postgres-replica
+      DB_WRITE_HOST: postgres-master
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres-master:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+    networks:
+      - course-network
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  postgres-replica-data:
+
+networks:
+  course-network:
+    driver: bridge

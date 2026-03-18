@@ -350,6 +350,60 @@ func SetupRouter(dbConns *DBConnections) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"message": "Course deleted successfully"})
 	})
 
+	// Metrics Endpoints
+	// GET /metrics/circuit-breaker - ตรวจสอบสถานะ circuit breaker
+	r.GET("/metrics/circuit-breaker", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"read_circuit_breaker":  readCircuitBreaker.State().String(),
+			"write_circuit_breaker": writeCircuitBreaker.State().String(),
+		})
+	})
+
+	// GET /metrics/recent - ดึง metrics ล่าสุด
+	r.GET("/metrics/recent", func(c *gin.Context) {
+		metrics, err := metricsLogger.GetRecentMetrics(100)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch recent metrics: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, metrics)
+	})
+
+	// GET /metrics/aggregate - ดึงข้อมูลสถิติรวม
+	r.GET("/metrics/aggregate", func(c *gin.Context) {
+		hoursParam := c.DefaultQuery("hours", "1")
+		hours := 1
+		if h, err := time.ParseDuration(hoursParam + "h"); err == nil {
+			hours = int(h.Hours())
+		}
+
+		startTime := time.Now().Add(-time.Duration(hours) * time.Hour)
+		endTime := time.Now()
+
+		metrics, err := metricsLogger.GetAggregateMetrics(startTime, endTime)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch aggregate metrics: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, metrics)
+	})
+
+	// GET /metrics/endpoint/:endpoint - ดึงสถิติของ endpoint เฉพาะ
+	r.GET("/metrics/endpoint/:endpoint", func(c *gin.Context) {
+		endpoint := c.Param("endpoint")
+		hoursParam := c.DefaultQuery("hours", "1")
+		hours := 1
+		if h, err := time.ParseDuration(hoursParam + "h"); err == nil {
+			hours = int(h.Hours())
+		}
+
+		stats, err := metricsLogger.GetEndpointStats(endpoint, hours)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch endpoint stats: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, stats)
+	})
 
 	return r
 }
