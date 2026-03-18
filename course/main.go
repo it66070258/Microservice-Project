@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/sony/gobreaker"
 )
 
 // เชื่อม database ใน postgres
@@ -52,19 +53,76 @@ type Course struct {
 func SetupRouter(conn *pgx.Conn) *gin.Engine {
 	r := gin.Default()
 
+	// สร้าง circuit breaker สำหรับ database
+	settings := gobreaker.Settings{
+		Name:        "Database-Operations",
+		MaxRequests: 3,                // Half-Open: ยอมให้ผ่าน 3 requests เพื่อ test
+		Interval:    time.Minute,      // Reset counts ทุก 1 นาที
+		Timeout:     30 * time.Second, // Open State นาน 30 วิ แล้วเปลี่ยนเป็น Half-Open
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			// ถ้า Error เกิน 20% และ Request รวมเกิน 5 ครั้ง ให้ตัดวงจร (Open)
+			return counts.Requests >= 5 && failureRatio >= 0.2
+		},
+	}
+	dbCircuitBreaker := gobreaker.NewCircuitBreaker(settings)
+
 	// ดึง course ออกมาทั้งหมด
 	r.GET("/courses", func(c *gin.Context) {
-		rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course`)
+		var courses []Course
+
+		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
+			rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course`)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var course Course
+				err := rows.Scan(
+					&course.CourseID,
+					&course.Subject,
+					&course.Credit,
+					&course.Section,
+					&course.DayOfWeek,
+					&course.StartTime,
+					&course.EndTime,
+					&course.Capacity,
+					&course.State,
+					&course.CurrentStudent,
+					&course.Prerequisite,
+				)
+				if err != nil {
+					return nil, err
+				}
+				courses = append(courses, course)
+			}
+			return courses, nil
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query courses: " + err.Error()})
 			return
 		}
-		defer rows.Close()
 
-		var courses []Course
-		for rows.Next() {
-			var course Course
-			err := rows.Scan(
+		c.JSON(http.StatusOK, courses)
+	})
+
+	// ดึง course ตัวเดียว
+	r.GET("/courses/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var course Course
+
+		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
+			return nil, conn.QueryRow(context.Background(),
+				`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course WHERE "course_id" = $1`,
+				id,
+			).Scan(
 				&course.CourseID,
 				&course.Subject,
 				&course.Credit,
@@ -77,37 +135,12 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 				&course.CurrentStudent,
 				&course.Prerequisite,
 			)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan course: " + err.Error()})
-				return
-			}
-			courses = append(courses, course)
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
 		}
-
-		c.JSON(http.StatusOK, courses)
-	})
-
-	// ดึง course ตัวเดียว
-	r.GET("/courses/:id", func(c *gin.Context) {
-		id := c.Param("id")
-
-		var course Course
-		err := conn.QueryRow(context.Background(),
-			`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course WHERE "course_id" = $1`,
-			id,
-		).Scan(
-			&course.CourseID,
-			&course.Subject,
-			&course.Credit,
-			&course.Section,
-			&course.DayOfWeek,
-			&course.StartTime,
-			&course.EndTime,
-			&course.Capacity,
-			&course.State,
-			&course.CurrentStudent,
-			&course.Prerequisite,
-		)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
 			return
@@ -137,37 +170,51 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			return
 		}
 
-		result, err := conn.Exec(context.Background(),
-			`UPDATE course SET
-				"subject"         = COALESCE($1, "subject"),
-				"credit"          = COALESCE($2, "credit"),
-				"section"         = COALESCE($3, "section"),
-				"day_of_week"     = COALESCE($4, "day_of_week"),
-				"start_time"      = COALESCE($5::TIME, "start_time"),
-				"end_time"        = COALESCE($6::TIME, "end_time"),
-				"capacity"        = COALESCE($7, "capacity"),
-				"state"           = COALESCE($8, "state"),
-				"current_student" = COALESCE($9, "current_student"),
-				"prerequisite"    = COALESCE($10, "prerequisite")
-			WHERE course_id = $11`,
-			body.Subject,
-			body.Credit,
-			body.Section,
-			body.DayOfWeek,
-			body.StartTime,
-			body.EndTime,
-			body.Capacity,
-			body.State,
-			body.CurrentStudent,
-			body.Prerequisite,
-			id,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update course: " + err.Error()})
+		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
+			result, err := conn.Exec(context.Background(),
+				`UPDATE course SET
+					"subject"         = COALESCE($1, "subject"),
+					"credit"          = COALESCE($2, "credit"),
+					"section"         = COALESCE($3, "section"),
+					"day_of_week"     = COALESCE($4, "day_of_week"),
+					"start_time"      = COALESCE($5::TIME, "start_time"),
+					"end_time"        = COALESCE($6::TIME, "end_time"),
+					"capacity"        = COALESCE($7, "capacity"),
+					"state"           = COALESCE($8, "state"),
+					"current_student" = COALESCE($9, "current_student"),
+					"prerequisite"    = COALESCE($10, "prerequisite")
+				WHERE course_id = $11`,
+				body.Subject,
+				body.Credit,
+				body.Section,
+				body.DayOfWeek,
+				body.StartTime,
+				body.EndTime,
+				body.Capacity,
+				body.State,
+				body.CurrentStudent,
+				body.Prerequisite,
+				id,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if result.RowsAffected() == 0 {
+				return nil, fmt.Errorf("course not found")
+			}
+			return result, nil
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
 			return
 		}
-		if result.RowsAffected() == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+		if err != nil {
+			if err.Error() == "course not found" {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update course: " + err.Error()})
+			}
 			return
 		}
 
@@ -194,21 +241,28 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			return
 		}
 
-		_, err := conn.Exec(context.Background(),
-			`INSERT INTO course ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite")
-			VALUES ($1, $2, $3, $4, $5, $6::TIME, $7::TIME, $8, $9, $10, $11)`,
-			body.CourseID,
-			body.Subject,
-			body.Credit,
-			body.Section,
-			body.DayOfWeek,
-			body.StartTime,
-			body.EndTime,
-			body.Capacity,
-			body.State,
-			body.CurrentStudent,
-			body.Prerequisite,
-		)
+		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
+			return conn.Exec(context.Background(),
+				`INSERT INTO course ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite")
+				VALUES ($1, $2, $3, $4, $5, $6::TIME, $7::TIME, $8, $9, $10, $11)`,
+				body.CourseID,
+				body.Subject,
+				body.Credit,
+				body.Section,
+				body.DayOfWeek,
+				body.StartTime,
+				body.EndTime,
+				body.Capacity,
+				body.State,
+				body.CurrentStudent,
+				body.Prerequisite,
+			)
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create course: " + err.Error()})
 			return
@@ -221,17 +275,30 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 	r.DELETE("/courses/:id", func(c *gin.Context) {
 		id := c.Param("id")
 
-		result, err := conn.Exec(context.Background(),
-			`DELETE FROM course WHERE course_id = $1`,
-			id,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete course: " + err.Error()})
+		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
+			result, err := conn.Exec(context.Background(),
+				`DELETE FROM course WHERE course_id = $1`,
+				id,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if result.RowsAffected() == 0 {
+				return nil, fmt.Errorf("course not found")
+			}
+			return result, nil
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
 			return
 		}
-
-		if result.RowsAffected() == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+		if err != nil {
+			if err.Error() == "course not found" {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete course: " + err.Error()})
+			}
 			return
 		}
 
