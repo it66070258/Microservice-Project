@@ -14,22 +14,49 @@ import (
 	"github.com/sony/gobreaker"
 )
 
-// เชื่อม database ใน postgres
-func connectToDB() *pgx.Conn {
-	host := os.Getenv("DB_HOST")
+// DBConnections เก็บ connections สำหรับ read และ write
+type DBConnections struct {
+	ReadConn  *pgx.Conn
+	WriteConn *pgx.Conn
+}
+
+// connectToReadDB เชื่อม database สำหรับ read (replica)
+func connectToReadDB() *pgx.Conn {
+	host := os.Getenv("DB_READ_HOST")
 	if host == "" {
-		host = "localhost"
+		host = "localhost" // fallback to localhost
 	}
 	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
 	conn, err := pgx.Connect(context.Background(), connStr)
 	if err != nil {
-		log.Fatal("Unable to connect to database:", err)
+		log.Fatal("Unable to connect to READ database:", err)
 	}
-	fmt.Println("Successfully connected to PostgreSQL!")
+	fmt.Println("Successfully connected to PostgreSQL READ database!")
 
 	err = conn.Ping(context.Background())
 	if err != nil {
-		log.Fatal("Database ping failed:", err)
+		log.Fatal("READ database ping failed:", err)
+	}
+
+	return conn
+}
+
+// connectToWriteDB เชื่อม database สำหรับ write (master)
+func connectToWriteDB() *pgx.Conn {
+	host := os.Getenv("DB_WRITE_HOST")
+	if host == "" {
+		host = "localhost" // fallback to localhost
+	}
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
+	conn, err := pgx.Connect(context.Background(), connStr)
+	if err != nil {
+		log.Fatal("Unable to connect to WRITE database:", err)
+	}
+	fmt.Println("Successfully connected to PostgreSQL WRITE database!")
+
+	err = conn.Ping(context.Background())
+	if err != nil {
+		log.Fatal("WRITE database ping failed:", err)
 	}
 
 	return conn
@@ -50,29 +77,47 @@ type Course struct {
 	Prerequisite   []string  `json:"prerequisite"`
 }
 
-func SetupRouter(conn *pgx.Conn) *gin.Engine {
+func SetupRouter(dbConns *DBConnections) *gin.Engine {
 	r := gin.Default()
 
-	// สร้าง circuit breaker สำหรับ database
-	settings := gobreaker.Settings{
-		Name:        "Database-Operations",
-		MaxRequests: 3,                // Half-Open: ยอมให้ผ่าน 3 requests เพื่อ test
-		Interval:    time.Minute,      // Reset counts ทุก 1 นาที
-		Timeout:     30 * time.Second, // Open State นาน 30 วิ แล้วเปลี่ยนเป็น Half-Open
+	// สร้าง circuit breaker สำหรับ database read
+	readSettings := gobreaker.Settings{
+		Name:        "Database-Read-Operations",
+		MaxRequests: 3,
+		Interval:    time.Minute,
+		Timeout:     30 * time.Second,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			// ถ้า Error เกิน 20% และ Request รวมเกิน 5 ครั้ง ให้ตัดวงจร (Open)
 			return counts.Requests >= 5 && failureRatio >= 0.2
 		},
 	}
-	dbCircuitBreaker := gobreaker.NewCircuitBreaker(settings)
+	readCircuitBreaker := gobreaker.NewCircuitBreaker(readSettings)
 
-	// ดึง course ออกมาทั้งหมด
+	// สร้าง circuit breaker สำหรับ database write
+	writeSettings := gobreaker.Settings{
+		Name:        "Database-Write-Operations",
+		MaxRequests: 3,
+		Interval:    time.Minute,
+		Timeout:     30 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 5 && failureRatio >= 0.2
+		},
+	}
+	writeCircuitBreaker := gobreaker.NewCircuitBreaker(writeSettings)
+
+	// สร้าง metrics logger (ใช้ write connection)
+	metricsLogger := NewMetricsLogger(dbConns.WriteConn)
+
+	// เพิ่ม metrics middleware (ใช้ read circuit breaker เป็น default)
+	r.Use(MetricsMiddleware(metricsLogger, readCircuitBreaker))
+
+	// ดึง course ออกมาทั้งหมด (READ)
 	r.GET("/courses", func(c *gin.Context) {
 		var courses []Course
 
-		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
-			rows, err := conn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course`)
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			rows, err := dbConns.ReadConn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course`)
 			if err != nil {
 				return nil, err
 			}
@@ -113,13 +158,13 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		c.JSON(http.StatusOK, courses)
 	})
 
-	// ดึง course ตัวเดียว
+	// ดึง course ตัวเดียว (READ)
 	r.GET("/courses/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var course Course
 
-		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
-			return nil, conn.QueryRow(context.Background(),
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			return nil, dbConns.ReadConn.QueryRow(context.Background(),
 				`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course WHERE "course_id" = $1`,
 				id,
 			).Scan(
@@ -149,7 +194,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		c.JSON(http.StatusOK, course)
 	})
 
-	// อัพเดท course
+	// อัพเดท course (WRITE)
 	r.PUT("/courses/:id", func(c *gin.Context) {
 		id := c.Param("id")
 
@@ -170,8 +215,8 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			return
 		}
 
-		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
-			result, err := conn.Exec(context.Background(),
+		_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
+			result, err := dbConns.WriteConn.Exec(context.Background(),
 				`UPDATE course SET
 					"subject"         = COALESCE($1, "subject"),
 					"credit"          = COALESCE($2, "credit"),
@@ -221,7 +266,7 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"message": "Course updated successfully"})
 	})
 
-	// เพิ่มข้อมูล course
+	// เพิ่มข้อมูล course (WRITE)
 	r.POST("/courses", func(c *gin.Context) {
 		var body struct {
 			CourseID       int      `json:"course_id"      binding:"required"`
@@ -241,8 +286,8 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			return
 		}
 
-		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
-			return conn.Exec(context.Background(),
+		_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
+			return dbConns.WriteConn.Exec(context.Background(),
 				`INSERT INTO course ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite")
 				VALUES ($1, $2, $3, $4, $5, $6::TIME, $7::TIME, $8, $9, $10, $11)`,
 				body.CourseID,
@@ -271,12 +316,12 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		c.JSON(http.StatusCreated, gin.H{"message": "Course created successfully"})
 	})
 
-	// ลบข้อมูล course
+	// ลบข้อมูล course (WRITE)
 	r.DELETE("/courses/:id", func(c *gin.Context) {
 		id := c.Param("id")
 
-		_, err := dbCircuitBreaker.Execute(func() (interface{}, error) {
-			result, err := conn.Exec(context.Background(),
+		_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
+			result, err := dbConns.WriteConn.Exec(context.Background(),
 				`DELETE FROM course WHERE course_id = $1`,
 				id,
 			)
@@ -305,14 +350,23 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"message": "Course deleted successfully"})
 	})
 
+
 	return r
 }
 
 func main() {
-	conn := connectToDB()
-	defer conn.Close(context.Background())
+	// เชื่อมต่อ read และ write databases
+	readConn := connectToReadDB()
+	writeConn := connectToWriteDB()
+	defer readConn.Close(context.Background())
+	defer writeConn.Close(context.Background())
 
-	r := SetupRouter(conn)
+	dbConns := &DBConnections{
+		ReadConn:  readConn,
+		WriteConn: writeConn,
+	}
+
+	r := SetupRouter(dbConns)
 	r.Run(":8000") // รันที่ localhost:8000
 
 	fmt.Println("Course Service started on port 8000") // เช็ค
