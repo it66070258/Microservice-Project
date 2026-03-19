@@ -305,14 +305,12 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatal("Unable to connect to READ database:", err)
 	}
-	defer testReadConn.Close(context.Background())
 
 	// เชื่อมต่อ write connection (ในการทดสอบใช้ database เดียวกัน)
 	testWriteConn, err = pgx.Connect(context.Background(), connStr)
 	if err != nil {
 		log.Fatal("Unable to connect to WRITE database:", err)
 	}
-	defer testWriteConn.Close(context.Background())
 
 	// สร้าง DBConnections สำหรับ test
 	testDBConns = &DBConnections{
@@ -322,7 +320,15 @@ func TestMain(m *testing.M) {
 
 	gin.SetMode(gin.TestMode)
 	fmt.Println("Connected to test database (read and write)")
-	m.Run()
+
+	// รัน tests
+	exitCode := m.Run()
+
+	// Cleanup: ปิด connections
+	testReadConn.Close(context.Background())
+	testWriteConn.Close(context.Background())
+
+	os.Exit(exitCode)
 }
 
 // ---- Reset DB ----
@@ -348,24 +354,6 @@ func resetDB() {
 	`)
 	if err != nil {
 		log.Fatal("Failed to ensure schema:", err)
-	}
-
-	// สร้างตาราง metrics ถ้ายังไม่มี
-	_, err = testWriteConn.Exec(context.Background(), `
-		CREATE TABLE IF NOT EXISTS request_metrics (
-			id SERIAL PRIMARY KEY,
-			timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
-			endpoint VARCHAR(255) NOT NULL,
-			method VARCHAR(10) NOT NULL,
-			status_code INTEGER NOT NULL,
-			response_time_ms FLOAT NOT NULL,
-			circuit_breaker_state VARCHAR(20),
-			error_message TEXT,
-			created_at TIMESTAMP DEFAULT NOW()
-		);
-	`)
-	if err != nil {
-		log.Fatal("Failed to ensure metrics schema:", err)
 	}
 
 	_, err = testWriteConn.Exec(context.Background(), `TRUNCATE TABLE course RESTART IDENTITY CASCADE`)
