@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -22,7 +23,11 @@ var testWriteConn *pgx.Conn
 var testDBConns *DBConnections
 
 func TestMain(m *testing.M) {
-	connStr := "user=postgres password=1234 host=localhost port=5432 dbname=register sslmode=disable"
+	host := os.Getenv("DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
 	var err error
 
 	// เชื่อมต่อ read connection
