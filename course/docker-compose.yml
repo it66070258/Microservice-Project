@@ -51,14 +51,12 @@ services:
       dockerfile: Dockerfile
     container_name: course-service
     environment:
-      DB_READ_HOST: postgres-replica
+      DB_READ_HOST: postgres-master
       DB_WRITE_HOST: postgres-master
     ports:
       - "8000:8000"
     depends_on:
       postgres-master:
-        condition: service_healthy
-      postgres-replica:
         condition: service_healthy
     networks:
       - course-network
