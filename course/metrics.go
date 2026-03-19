@@ -151,9 +151,9 @@ func (ml *MetricsLogger) GetEndpointStats(endpoint string, hours int) (*Aggregat
 			COUNT(*) as total_requests,
 			COUNT(*) FILTER (WHERE status_code < 400) as successful_requests,
 			COUNT(*) FILTER (WHERE status_code >= 400) as failed_requests,
-			ROUND((COUNT(*) FILTER (WHERE status_code < 400)::FLOAT / NULLIF(COUNT(*), 0)::FLOAT * 100)::numeric, 2) as success_rate,
-			ROUND(AVG(response_time_ms)::numeric, 2) as average_response_time_ms,
-			ROUND((COUNT(*) FILTER (WHERE status_code >= 400)::FLOAT / NULLIF(COUNT(*), 0)::FLOAT * 100)::numeric, 2) as error_rate,
+			COALESCE(ROUND((COUNT(*) FILTER (WHERE status_code < 400)::FLOAT / NULLIF(COUNT(*), 0)::FLOAT * 100)::numeric, 2), 0) as success_rate,
+			COALESCE(ROUND(AVG(response_time_ms)::numeric, 2), 0) as average_response_time_ms,
+			COALESCE(ROUND((COUNT(*) FILTER (WHERE status_code >= 400)::FLOAT / NULLIF(COUNT(*), 0)::FLOAT * 100)::numeric, 2), 0) as error_rate,
 			COUNT(*) FILTER (WHERE circuit_breaker_state = 'OPEN') as circuit_breaker_trips
 		FROM request_metrics
 		WHERE endpoint = $1 AND timestamp >= $2`,
