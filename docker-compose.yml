@@ -1,4 +1,4 @@
-services:
+﻿services:
   postgres:
     image: postgres:16-alpine
     container_name: postgres
@@ -16,6 +16,8 @@ services:
       - ./enrollment/db/seed.sql:/docker-entrypoint-initdb.d/06-enrollment-seed.sql
     ports:
       - "5432:5432"
+    networks:
+      - monitoring
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d register"]
       interval: 5s
@@ -28,6 +30,8 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    networks:
+      - monitoring
     healthcheck:
       test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running"]
       interval: 10s
@@ -44,6 +48,8 @@ services:
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
     ports:
       - "8002:8002"
+    networks:
+      - monitoring
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,6 +66,8 @@ services:
       DB_WRITE_HOST: postgres
     ports:
       - "8000:8000"
+    networks:
+      - monitoring
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,6 +81,8 @@ services:
       DB_HOST: postgres
     ports:
       - "8001:8001"
+    networks:
+      - monitoring
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,6 +94,8 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
       - "9090:9090"
+    networks:
+      - monitoring
 
   grafana:
     image: grafana/grafana:latest
@@ -92,8 +104,13 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - monitoring
     depends_on:
       - prometheus
 
 volumes:
   postgres_data:
+
+networks:
+  monitoring:
