@@ -12,7 +12,50 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/sony/gobreaker"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+	httpDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "http_request_duration_seconds",
+			Help: "Duration of HTTP requests in seconds",
+		},
+		[]string{"method", "path"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpDuration)
+}
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start).Seconds()
+
+		status := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
+
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		httpDuration.WithLabelValues(method, path).Observe(duration)
+	}
+}
 
 // DBConnections เก็บ connections สำหรับ read และ write
 type DBConnections struct {
@@ -79,6 +122,10 @@ type Course struct {
 
 func SetupRouter(dbConns *DBConnections) *gin.Engine {
 	r := gin.Default()
+
+	// ใช้งาน Prometheus Middleware
+	r.Use(PrometheusMiddleware())
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// สร้าง circuit breaker สำหรับ database read
 	readSettings := gobreaker.Settings{

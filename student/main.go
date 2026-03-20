@@ -12,7 +12,52 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+	httpDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "http_request_duration_seconds",
+			Help: "Duration of HTTP requests in seconds",
+		},
+		[]string{"method", "path"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpDuration)
+}
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start).Seconds()
+
+		status := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
+
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		httpDuration.WithLabelValues(method, path).Observe(duration)
+	}
+}
 
 // โครงสร้างข้อมูลนักเรียน
 type Student struct {
@@ -68,6 +113,10 @@ func AuthRequired() gin.HandlerFunc {
 
 func SetupRouter(conn *pgx.Conn) *gin.Engine {
 	r := gin.Default()
+
+	// ใช้งาน Prometheus Middleware
+	r.Use(PrometheusMiddleware())
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	store := cookie.NewStore([]byte("super-secret-key"))
 	r.Use(sessions.Sessions("student_session", store))
