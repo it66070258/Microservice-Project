@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -20,6 +21,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func registerConsul(serviceName string, port int) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		reg := map[string]interface{}{
+			"ID":      serviceName,
+			"Name":    serviceName,
+			"Address": serviceName,
+			"Port":    port,
+			"Check": map[string]interface{}{
+				"HTTP":     fmt.Sprintf("http://%s:%d/metrics", serviceName, port),
+				"Interval": "10s",
+				"Timeout":  "5s",
+			},
+		}
+
+		payload, _ := json.Marshal(reg)
+		req, _ := http.NewRequest("PUT", "http://consul:8500/v1/agent/service/register", bytes.NewBuffer(payload))
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Println("Consul Registration Failed:", err)
+			return
+		}
+		defer resp.Body.Close()
+		log.Println("Consul Registration Success for", serviceName)
+	}()
+}
 
 var (
 	httpRequestsTotal = prometheus.NewCounterVec(
@@ -96,6 +127,8 @@ var (
 const queueName = "enrollment_queue"
 
 func main() {
+	registerConsul("enrollment-service", 8002)
+
 	var err error
 
 	// 1. เชื่อมต่อ Database

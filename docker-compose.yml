@@ -109,6 +109,16 @@
     depends_on:
       - prometheus
 
+  consul:
+    image: hashicorp/consul:latest
+    container_name: consul
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    command: "agent -server -ui -node=server-1 -bootstrap-expect=1 -client=0.0.0.0"
+    networks:
+      - monitoring
+
 volumes:
   postgres_data:
 

@@ -2,7 +2,9 @@ package main
 
 // dependency
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,6 +18,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func registerConsul(serviceName string, port int) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		reg := map[string]interface{}{
+			"ID":      serviceName,
+			"Name":    serviceName,
+			"Address": serviceName,
+			"Port":    port,
+			"Check": map[string]interface{}{
+				"HTTP":     fmt.Sprintf("http://%s:%d/metrics", serviceName, port),
+				"Interval": "10s",
+				"Timeout":  "5s",
+			},
+		}
+
+		payload, _ := json.Marshal(reg)
+		req, _ := http.NewRequest("PUT", "http://consul:8500/v1/agent/service/register", bytes.NewBuffer(payload))
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Println("Consul Registration Failed:", err)
+			return
+		}
+		defer resp.Body.Close()
+		log.Println("Consul Registration Success for", serviceName)
+	}()
+}
 
 var (
 	httpRequestsTotal = prometheus.NewCounterVec(
@@ -395,6 +427,8 @@ func SetupRouter(dbConns *DBConnections) *gin.Engine {
 }
 
 func main() {
+	registerConsul("course-service", 8000)
+
 	// เชื่อมต่อ read และ write databases
 	readConn := connectToReadDB()
 	writeConn := connectToWriteDB()
