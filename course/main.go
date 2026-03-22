@@ -1,6 +1,5 @@
 package main
 
-// dependency
 import (
 	"bytes"
 	"context"
@@ -9,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,11 +17,166 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 )
+
+const exchangeName = "enrollment_events"
+
+var rabbitChannel *amqp.Channel
+
+type EnrollmentEvent struct {
+	StudentID int   `json:"student_id"`
+	CourseIDs []int `json:"course_ids"`
+}
+
+func connectRabbitMQ() {
+
+	rabbitURL := os.Getenv("RABBITMQ_URL")
+	if rabbitURL == "" {
+		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
+	}
+
+	var conn *amqp.Connection
+	var err error
+
+	for i := 0; i < 10; i++ {
+
+		conn, err = amqp.Dial(rabbitURL)
+
+		if err == nil {
+			break
+		}
+
+		log.Println("RabbitMQ retry...")
+		time.Sleep(5 * time.Second)
+	}
+
+	if err != nil {
+		log.Fatal("RabbitMQ connection failed")
+	}
+
+	rabbitChannel, err = conn.Channel()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = rabbitChannel.ExchangeDeclare(
+		exchangeName,
+		"fanout",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("RabbitMQ connected")
+}
+
+func startConsumer(dbConns *DBConnections) {
+
+	q, err := rabbitChannel.QueueDeclare(
+		"",
+		false,
+		true,
+		true,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = rabbitChannel.QueueBind(
+		q.Name,
+		"",
+		exchangeName,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msgs, err := rabbitChannel.Consume(
+		q.Name,
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	go func() {
+
+		for d := range msgs {
+
+			var event EnrollmentEvent
+
+			err := json.Unmarshal(d.Body, &event)
+
+			if err != nil {
+				log.Println("JSON decode error:", err)
+				continue
+			}
+
+			log.Println("Course Event Received")
+
+			for _, courseID := range event.CourseIDs {
+
+				studentStr := strconv.Itoa(event.StudentID)
+
+				_, err := dbConns.WriteConn.Exec(
+					context.Background(),
+					`UPDATE course 
+					 SET current_student =
+					 CASE
+						WHEN $1 = ANY(current_student) THEN current_student
+						ELSE array_append(current_student,$1)
+					 END
+					 WHERE course_id=$2`,
+					studentStr,
+					courseID,
+				)
+
+				if err != nil {
+					log.Println("Update course error:", err)
+				}
+
+				_, err = dbConns.WriteConn.Exec(
+					context.Background(),
+					`UPDATE course
+					 SET state='closed'
+					 WHERE course_id=$1
+					 AND array_length(current_student,1) >= capacity`,
+					courseID,
+				)
+
+				if err != nil {
+					log.Println("Capacity update error:", err)
+				}
+			}
+		}
+	}()
+}
 
 func registerConsul(serviceName string, port int) {
 	go func() {
+
 		time.Sleep(5 * time.Second)
+
 		reg := map[string]interface{}{
 			"ID":      serviceName,
 			"Name":    serviceName,
@@ -35,16 +190,26 @@ func registerConsul(serviceName string, port int) {
 		}
 
 		payload, _ := json.Marshal(reg)
-		req, _ := http.NewRequest("PUT", "http://consul:8500/v1/agent/service/register", bytes.NewBuffer(payload))
+
+		req, _ := http.NewRequest(
+			"PUT",
+			"http://consul:8500/v1/agent/service/register",
+			bytes.NewBuffer(payload),
+		)
+
 		req.Header.Set("Content-Type", "application/json")
 
 		client := &http.Client{}
+
 		resp, err := client.Do(req)
+
 		if err != nil {
 			log.Println("Consul Registration Failed:", err)
 			return
 		}
+
 		defer resp.Body.Close()
+
 		log.Println("Consul Registration Success for", serviceName)
 	}()
 }
@@ -57,10 +222,11 @@ var (
 		},
 		[]string{"method", "path", "status"},
 	)
+
 	httpDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "http_request_duration_seconds",
-			Help: "Duration of HTTP requests in seconds",
+			Help: "Duration of HTTP requests",
 		},
 		[]string{"method", "path"},
 	)
@@ -72,14 +238,20 @@ func init() {
 }
 
 func PrometheusMiddleware() gin.HandlerFunc {
+
 	return func(c *gin.Context) {
+
 		start := time.Now()
+
 		c.Next()
+
 		duration := time.Since(start).Seconds()
 
 		status := fmt.Sprintf("%d", c.Writer.Status())
 		method := c.Request.Method
+
 		path := c.FullPath()
+
 		if path == "" {
 			path = c.Request.URL.Path
 		}
@@ -89,55 +261,57 @@ func PrometheusMiddleware() gin.HandlerFunc {
 	}
 }
 
-// DBConnections เก็บ connections สำหรับ read และ write
 type DBConnections struct {
 	ReadConn  *pgx.Conn
 	WriteConn *pgx.Conn
 }
 
-// connectToReadDB เชื่อม database สำหรับ read (replica)
 func connectToReadDB() *pgx.Conn {
+
 	host := os.Getenv("DB_READ_HOST")
 	if host == "" {
-		host = "localhost" // fallback to localhost
+		host = "postgres"
 	}
-	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
+
+	connStr := fmt.Sprintf(
+		"user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable",
+		host,
+	)
+
 	conn, err := pgx.Connect(context.Background(), connStr)
+
 	if err != nil {
 		log.Fatal("Unable to connect to READ database:", err)
 	}
-	fmt.Println("Successfully connected to PostgreSQL READ database!")
 
-	err = conn.Ping(context.Background())
-	if err != nil {
-		log.Fatal("READ database ping failed:", err)
-	}
+	log.Println("READ DB connected")
 
 	return conn
 }
 
-// connectToWriteDB เชื่อม database สำหรับ write (master)
 func connectToWriteDB() *pgx.Conn {
+
 	host := os.Getenv("DB_WRITE_HOST")
 	if host == "" {
-		host = "localhost" // fallback to localhost
+		host = "postgres"
 	}
-	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
+
+	connStr := fmt.Sprintf(
+		"user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable",
+		host,
+	)
+
 	conn, err := pgx.Connect(context.Background(), connStr)
+
 	if err != nil {
 		log.Fatal("Unable to connect to WRITE database:", err)
 	}
-	fmt.Println("Successfully connected to PostgreSQL WRITE database!")
 
-	err = conn.Ping(context.Background())
-	if err != nil {
-		log.Fatal("WRITE database ping failed:", err)
-	}
+	log.Println("WRITE DB connected")
 
 	return conn
 }
 
-// สร้างประเภทตัวแปร
 type Course struct {
 	CourseID       int       `json:"course_id"`
 	Subject        string    `json:"subject"`
@@ -153,52 +327,43 @@ type Course struct {
 }
 
 func SetupRouter(dbConns *DBConnections) *gin.Engine {
+
 	r := gin.Default()
 
-	// ใช้งาน Prometheus Middleware
 	r.Use(PrometheusMiddleware())
+
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// สร้าง circuit breaker สำหรับ database read
-	readSettings := gobreaker.Settings{
-		Name:        "Database-Read-Operations",
-		MaxRequests: 3,
-		Interval:    time.Minute,
-		Timeout:     30 * time.Second,
-		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return counts.Requests >= 5 && failureRatio >= 0.2
+	readCB := gobreaker.NewCircuitBreaker(
+		gobreaker.Settings{
+			Name:     "read-db",
+			Interval: time.Minute,
+			Timeout:  30 * time.Second,
 		},
-	}
-	readCircuitBreaker := gobreaker.NewCircuitBreaker(readSettings)
+	)
 
-	// สร้าง circuit breaker สำหรับ database write
-	writeSettings := gobreaker.Settings{
-		Name:        "Database-Write-Operations",
-		MaxRequests: 3,
-		Interval:    time.Minute,
-		Timeout:     30 * time.Second,
-		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return counts.Requests >= 5 && failureRatio >= 0.2
-		},
-	}
-	writeCircuitBreaker := gobreaker.NewCircuitBreaker(writeSettings)
-
-	// ดึง course ออกมาทั้งหมด (READ)
 	r.GET("/courses", func(c *gin.Context) {
+
 		var courses []Course
 
-		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
-			rows, err := dbConns.ReadConn.Query(context.Background(), `SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course`)
+		_, err := readCB.Execute(func() (interface{}, error) {
+
+			rows, err := dbConns.ReadConn.Query(
+				context.Background(),
+				`SELECT course_id,subject,credit,section,day_of_week,start_time,end_time,capacity,state,current_student,prerequisite FROM course`,
+			)
+
 			if err != nil {
 				return nil, err
 			}
+
 			defer rows.Close()
 
 			for rows.Next() {
+
 				var course Course
-				err := rows.Scan(
+
+				rows.Scan(
 					&course.CourseID,
 					&course.Subject,
 					&course.Credit,
@@ -211,227 +376,33 @@ func SetupRouter(dbConns *DBConnections) *gin.Engine {
 					&course.CurrentStudent,
 					&course.Prerequisite,
 				)
-				if err != nil {
-					return nil, err
-				}
+
 				courses = append(courses, course)
 			}
+
 			return courses, nil
 		})
 
-		if err == gobreaker.ErrOpenState {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
-			return
-		}
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query courses: " + err.Error()})
+
+			c.JSON(500, gin.H{"error": err.Error()})
+
 			return
 		}
 
-		c.JSON(http.StatusOK, courses)
-	})
-
-	// ดึง course ตัวเดียว (READ)
-	r.GET("/courses/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		var course Course
-
-		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
-			return nil, dbConns.ReadConn.QueryRow(context.Background(),
-				`SELECT "course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite" FROM course WHERE "course_id" = $1`,
-				id,
-			).Scan(
-				&course.CourseID,
-				&course.Subject,
-				&course.Credit,
-				&course.Section,
-				&course.DayOfWeek,
-				&course.StartTime,
-				&course.EndTime,
-				&course.Capacity,
-				&course.State,
-				&course.CurrentStudent,
-				&course.Prerequisite,
-			)
-		})
-
-		if err == gobreaker.ErrOpenState {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
-			return
-		}
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
-			return
-		}
-
-		c.JSON(http.StatusOK, course)
-	})
-
-	// อัพเดท course (WRITE)
-	r.PUT("/courses/:id", func(c *gin.Context) {
-		id := c.Param("id")
-
-		var body struct {
-			Subject        *string  `json:"subject"`
-			Credit         *int     `json:"credit"`
-			Section        []string `json:"section"`
-			DayOfWeek      *string  `json:"day_of_week"`
-			StartTime      *string  `json:"start_time"`
-			EndTime        *string  `json:"end_time"`
-			Capacity       *int     `json:"capacity"`
-			State          *string  `json:"state"`
-			CurrentStudent []string `json:"current_student"`
-			Prerequisite   []string `json:"prerequisite"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON body: " + err.Error()})
-			return
-		}
-
-		_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
-			result, err := dbConns.WriteConn.Exec(context.Background(),
-				`UPDATE course SET
-					"subject"         = COALESCE($1, "subject"),
-					"credit"          = COALESCE($2, "credit"),
-					"section"         = COALESCE($3, "section"),
-					"day_of_week"     = COALESCE($4, "day_of_week"),
-					"start_time"      = COALESCE($5::TIME, "start_time"),
-					"end_time"        = COALESCE($6::TIME, "end_time"),
-					"capacity"        = COALESCE($7, "capacity"),
-					"state"           = COALESCE($8, "state"),
-					"current_student" = COALESCE($9, "current_student"),
-					"prerequisite"    = COALESCE($10, "prerequisite")
-				WHERE course_id = $11`,
-				body.Subject,
-				body.Credit,
-				body.Section,
-				body.DayOfWeek,
-				body.StartTime,
-				body.EndTime,
-				body.Capacity,
-				body.State,
-				body.CurrentStudent,
-				body.Prerequisite,
-				id,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if result.RowsAffected() == 0 {
-				return nil, fmt.Errorf("course not found")
-			}
-			return result, nil
-		})
-
-		if err == gobreaker.ErrOpenState {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
-			return
-		}
-		if err != nil {
-			if err.Error() == "course not found" {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
-			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update course: " + err.Error()})
-			}
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"message": "Course updated successfully"})
-	})
-
-	// เพิ่มข้อมูล course (WRITE)
-	r.POST("/courses", func(c *gin.Context) {
-		var body struct {
-			CourseID       int      `json:"course_id"      binding:"required"`
-			Subject        string   `json:"subject"        binding:"required"`
-			Credit         int      `json:"credit"         binding:"required"`
-			Section        []string `json:"section"        binding:"required"`
-			DayOfWeek      string   `json:"day_of_week"    binding:"required"`
-			StartTime      string   `json:"start_time"     binding:"required"`
-			EndTime        string   `json:"end_time"       binding:"required"`
-			Capacity       int      `json:"capacity"       binding:"required"`
-			State          string   `json:"state"          binding:"required"`
-			CurrentStudent []string `json:"current_student"`
-			Prerequisite   []string `json:"prerequisite"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON body: " + err.Error()})
-			return
-		}
-
-		_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
-			return dbConns.WriteConn.Exec(context.Background(),
-				`INSERT INTO course ("course_id", "subject", "credit", "section", "day_of_week", "start_time", "end_time", "capacity", "state", "current_student", "prerequisite")
-				VALUES ($1, $2, $3, $4, $5, $6::TIME, $7::TIME, $8, $9, $10, $11)`,
-				body.CourseID,
-				body.Subject,
-				body.Credit,
-				body.Section,
-				body.DayOfWeek,
-				body.StartTime,
-				body.EndTime,
-				body.Capacity,
-				body.State,
-				body.CurrentStudent,
-				body.Prerequisite,
-			)
-		})
-
-		if err == gobreaker.ErrOpenState {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
-			return
-		}
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create course: " + err.Error()})
-			return
-		}
-
-		c.JSON(http.StatusCreated, gin.H{"message": "Course created successfully"})
-	})
-
-	// ลบข้อมูล course (WRITE)
-	r.DELETE("/courses/:id", func(c *gin.Context) {
-		id := c.Param("id")
-
-		_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
-			result, err := dbConns.WriteConn.Exec(context.Background(),
-				`DELETE FROM course WHERE course_id = $1`,
-				id,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if result.RowsAffected() == 0 {
-				return nil, fmt.Errorf("course not found")
-			}
-			return result, nil
-		})
-
-		if err == gobreaker.ErrOpenState {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
-			return
-		}
-		if err != nil {
-			if err.Error() == "course not found" {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
-			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete course: " + err.Error()})
-			}
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"message": "Course deleted successfully"})
+		c.JSON(200, courses)
 	})
 
 	return r
 }
 
 func main() {
+
 	registerConsul("course-service", 8000)
 
-	// เชื่อมต่อ read และ write databases
 	readConn := connectToReadDB()
 	writeConn := connectToWriteDB()
+
 	defer readConn.Close(context.Background())
 	defer writeConn.Close(context.Background())
 
@@ -440,8 +411,13 @@ func main() {
 		WriteConn: writeConn,
 	}
 
-	r := SetupRouter(dbConns)
-	r.Run(":8000") // รันที่ localhost:8000
+	connectRabbitMQ()
 
-	fmt.Println("Course Service started on port 8000") // เช็ค
+	startConsumer(dbConns)
+
+	r := SetupRouter(dbConns)
+
+	log.Println("Course Service running :8000")
+
+	r.Run(":8000")
 }

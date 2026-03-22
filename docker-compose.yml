@@ -1,4 +1,7 @@
-﻿services:
+﻿version: "3.9"
+
+services:
+
   postgres:
     image: postgres:16-alpine
     container_name: postgres
@@ -23,31 +26,36 @@
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 20s
 
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:3-management
     container_name: rabbitmq
+    restart: unless-stopped
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
     networks:
       - monitoring
     healthcheck:
-      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 30s
+      timeout: 10s
       retries: 5
 
-  enrollment-service:
+  course-service:
     build:
-      context: ./enrollment
+      context: ./course
       dockerfile: dockerfile
-    container_name: enrollment-service
+    container_name: course-service
     environment:
-      DB_HOST: postgres
-      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      DATABASE_URL: postgres://postgres:1234@postgres:5432/register?sslmode=disable
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
     ports:
-      - "8002:8002"
+      - "8000:8000"
     networks:
       - monitoring
     depends_on:
@@ -56,35 +64,37 @@
       rabbitmq:
         condition: service_healthy
 
-  course-service:
-    build:
-      context: ./course
-      dockerfile: dockerfile
-    container_name: course-service
-    environment:
-      DB_READ_HOST: postgres
-      DB_WRITE_HOST: postgres
-    ports:
-      - "8000:8000"
-    networks:
-      - monitoring
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   student-service:
     build:
       context: ./student
       dockerfile: dockerfile
     container_name: student-service
     environment:
-      DB_HOST: postgres
+      DATABASE_URL: postgres://postgres:1234@postgres:5432/register?sslmode=disable
     ports:
       - "8001:8001"
     networks:
       - monitoring
     depends_on:
       postgres:
+        condition: service_healthy
+
+  enrollment-service:
+    build:
+      context: ./enrollment
+      dockerfile: dockerfile
+    container_name: enrollment-service
+    environment:
+      DATABASE_URL: postgres://postgres:1234@postgres:5432/register?sslmode=disable
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    ports:
+      - "8002:8002"
+    networks:
+      - monitoring
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   prometheus:
@@ -103,7 +113,7 @@
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
     networks:
       - monitoring
     depends_on:
@@ -115,7 +125,7 @@
     ports:
       - "8500:8500"
       - "8600:8600/udp"
-    command: "agent -server -ui -node=server-1 -bootstrap-expect=1 -client=0.0.0.0"
+    command: agent -server -ui -node=server-1 -bootstrap-expect=1 -client=0.0.0.0
     networks:
       - monitoring
 

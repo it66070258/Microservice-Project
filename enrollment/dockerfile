@@ -10,9 +10,11 @@ RUN apk add --no-cache git
 COPY go.mod go.sum ./
 RUN go mod download
 
+
 # คัดลอกโค้ดที่เหลือ
 COPY . .
 
+RUN go mod tidy
 # Build เป็น binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o enrollment-service .
 

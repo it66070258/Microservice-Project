@@ -7,9 +7,11 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
+
 # Copy source code ทั้งหมดของ student service
 COPY . .
 
+RUN go mod tidy
 # Build binary โดยตั้งชื่อว่า student-service
 RUN CGO_ENABLED=0 GOOS=linux go build -o student-service .
 
