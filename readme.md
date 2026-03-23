@@ -60,7 +60,8 @@
 
 ```bash
 https://github.com/it66070258/Microservice-Project.git
-
+```
+```bash
 docker compose up -d --build
 ```
 
@@ -181,6 +182,8 @@ _เพิ่มเติม Query ที่น่าสนใจ:_
 
 ```promql
 rate(http_request_duration_seconds_sum[1m])
+```
+```promql
 rate(http_request_duration_seconds_count[1m])
 ```
 
