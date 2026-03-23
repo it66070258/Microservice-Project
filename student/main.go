@@ -13,6 +13,7 @@ import (
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/sony/gobreaker"
 	"golang.org/x/crypto/bcrypt"
 
 	"time"
@@ -116,17 +117,37 @@ func checkPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
-func connectToDB() *pgx.Conn {
-	host := os.Getenv("DB_HOST")
+// DBConnections เก็บ connections สำหรับ read และ write
+type DBConnections struct {
+	ReadConn  *pgx.Conn
+	WriteConn *pgx.Conn
+}
+
+func connectToReadDB() *pgx.Conn {
+	host := os.Getenv("DB_READ_HOST")
 	if host == "" {
 		host = "localhost"
 	}
 	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
 	conn, err := pgx.Connect(context.Background(), connStr)
 	if err != nil {
-		log.Fatal("Unable to connect to database:", err)
+		log.Fatal("Unable to connect to READ database:", err)
 	}
-	fmt.Println("Successfully connected to PostgreSQL (Student Service)!")
+	fmt.Println("Successfully connected to PostgreSQL READ database (Student Service)!")
+	return conn
+}
+
+func connectToWriteDB() *pgx.Conn {
+	host := os.Getenv("DB_WRITE_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
+	conn, err := pgx.Connect(context.Background(), connStr)
+	if err != nil {
+		log.Fatal("Unable to connect to WRITE database:", err)
+	}
+	fmt.Println("Successfully connected to PostgreSQL WRITE database (Student Service)!")
 	return conn
 }
 
@@ -143,7 +164,7 @@ func AuthRequired() gin.HandlerFunc {
 	}
 }
 
-func SetupRouter(conn *pgx.Conn) *gin.Engine {
+func SetupRouter(dbConns *DBConnections) *gin.Engine {
 	r := gin.Default()
 
 	// ใช้งาน Prometheus Middleware
@@ -152,6 +173,90 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 
 	store := cookie.NewStore([]byte("super-secret-key"))
 	r.Use(sessions.Sessions("student_session", store))
+
+	// สร้าง circuit breaker สำหรับ database read
+	readSettings := gobreaker.Settings{
+		Name:        "Database-Read-Operations",
+		MaxRequests: 3,
+		Interval:    time.Minute,
+		Timeout:     30 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 5 && failureRatio >= 0.2
+		},
+	}
+	readCircuitBreaker := gobreaker.NewCircuitBreaker(readSettings)
+
+	// สร้าง circuit breaker สำหรับ database write
+	writeSettings := gobreaker.Settings{
+		Name:        "Database-Write-Operations",
+		MaxRequests: 3,
+		Interval:    time.Minute,
+		Timeout:     30 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 5 && failureRatio >= 0.2
+		},
+	}
+	writeCircuitBreaker := gobreaker.NewCircuitBreaker(writeSettings)
+
+	// GET all students
+	r.GET("/students", func(c *gin.Context) {
+		var students []Student
+
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			rows, err := dbConns.ReadConn.Query(context.Background(), `SELECT student_id, first_name, last_name, email, birthdate, gender, year_level, graded_subject FROM student`)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var s Student
+				err := rows.Scan(&s.StudentID, &s.FirstName, &s.LastName, &s.Email, &s.Birthdate, &s.Gender, &s.YearLevel, &s.GradedSubject)
+				if err != nil {
+					return nil, err
+				}
+				students = append(students, s)
+			}
+			return students, nil
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query students: " + err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, students)
+	})
+
+	// GET student by ID
+	r.GET("/students/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var s Student
+
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			return nil, dbConns.ReadConn.QueryRow(context.Background(),
+				`SELECT student_id, first_name, last_name, email, birthdate, gender, year_level, graded_subject FROM student WHERE student_id = $1`,
+				id,
+			).Scan(&s.StudentID, &s.FirstName, &s.LastName, &s.Email, &s.Birthdate, &s.Gender, &s.YearLevel, &s.GradedSubject)
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
+			return
+		}
+
+		c.JSON(http.StatusOK, s)
+	})
 
 	// 1. Register พร้อม Hash Password
 	r.POST("/register", func(c *gin.Context) {
@@ -167,11 +272,18 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 			return
 		}
 
-		_, err = conn.Exec(context.Background(),
-			`INSERT INTO student (student_id, first_name, last_name, email, password, birthdate, gender, year_level, graded_subject) 
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			s.StudentID, s.FirstName, s.LastName, s.Email, hashedPassword, s.Birthdate, s.Gender, s.YearLevel, s.GradedSubject,
-		)
+		_, err = writeCircuitBreaker.Execute(func() (interface{}, error) {
+			return dbConns.WriteConn.Exec(context.Background(),
+				`INSERT INTO student (student_id, first_name, last_name, email, password, birthdate, gender, year_level, graded_subject) 
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+				s.StudentID, s.FirstName, s.LastName, s.Email, hashedPassword, s.Birthdate, s.Gender, s.YearLevel, s.GradedSubject,
+			)
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Registration failed: " + err.Error()})
 			return
@@ -192,8 +304,16 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 
 		var studentID int
 		var dbPassword string
-		err := conn.QueryRow(context.Background(),
-			`SELECT student_id, password FROM student WHERE email = $1`, loginData.Email).Scan(&studentID, &dbPassword)
+
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			return nil, dbConns.ReadConn.QueryRow(context.Background(),
+				`SELECT student_id, password FROM student WHERE email = $1`, loginData.Email).Scan(&studentID, &dbPassword)
+		})
+
+		if err == gobreaker.ErrOpenState {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+			return
+		}
 
 		if err != nil || !checkPasswordHash(loginData.Password, dbPassword) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Email หรือ Password ไม่ถูกต้อง"})
@@ -220,11 +340,19 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 		profile.GET("", func(c *gin.Context) {
 			userID := sessions.Default(c).Get("user_id")
 			var s Student
-			err := conn.QueryRow(context.Background(),
-				`SELECT student_id, first_name, last_name, email, birthdate, gender, year_level, graded_subject 
-				 FROM student WHERE student_id = $1`, userID).Scan(
-				&s.StudentID, &s.FirstName, &s.LastName, &s.Email, &s.Birthdate, &s.Gender, &s.YearLevel, &s.GradedSubject,
-			)
+
+			_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+				return nil, dbConns.ReadConn.QueryRow(context.Background(),
+					`SELECT student_id, first_name, last_name, email, birthdate, gender, year_level, graded_subject 
+					 FROM student WHERE student_id = $1`, userID).Scan(
+					&s.StudentID, &s.FirstName, &s.LastName, &s.Email, &s.Birthdate, &s.Gender, &s.YearLevel, &s.GradedSubject,
+				)
+			})
+
+			if err == gobreaker.ErrOpenState {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+				return
+			}
 			if err != nil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 				return
@@ -240,10 +368,17 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 				return
 			}
 
-			_, err := conn.Exec(context.Background(),
-				`UPDATE student SET first_name=$1, last_name=$2, birthdate=$3, gender=$4, year_level=$5 WHERE student_id=$6`,
-				up.FirstName, up.LastName, up.Birthdate, up.Gender, up.YearLevel, userID,
-			)
+			_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
+				return dbConns.WriteConn.Exec(context.Background(),
+					`UPDATE student SET first_name=$1, last_name=$2, birthdate=$3, gender=$4, year_level=$5 WHERE student_id=$6`,
+					up.FirstName, up.LastName, up.Birthdate, up.Gender, up.YearLevel, userID,
+				)
+			})
+
+			if err == gobreaker.ErrOpenState {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable (circuit breaker is open)"})
+				return
+			}
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Update failed"})
 				return
@@ -258,10 +393,17 @@ func SetupRouter(conn *pgx.Conn) *gin.Engine {
 func main() {
 	registerConsul("student-service", 8001)
 
-	conn := connectToDB()
-	defer conn.Close(context.Background())
+	readConn := connectToReadDB()
+	writeConn := connectToWriteDB()
+	defer readConn.Close(context.Background())
+	defer writeConn.Close(context.Background())
 
-	r := SetupRouter(conn)
+	dbConns := &DBConnections{
+		ReadConn:  readConn,
+		WriteConn: writeConn,
+	}
+
+	r := SetupRouter(dbConns)
 
 	port := ":8001" // แยกพอร์ตเป็น 8001 ไม่ให้ชนกับ Course
 	fmt.Printf("Student Service started on port %s\n", port)
