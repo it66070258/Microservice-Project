@@ -548,17 +548,27 @@ func processEnrollment(dbConn *pgx.Conn, msg EnrollmentMessage) EnrollmentRespon
 	for _, courseID := range msg.CourseIDs {
 		var capacity int
 		var currentStudents []string
+		var state string
 
-		// ดึงข้อมูล course
+		// ดึงข้อมูล course พร้อม lock เพื่อป้องกัน race condition
 		err := tx.QueryRow(ctx,
-			`SELECT capacity, COALESCE(current_student, '{}'::text[]) FROM course WHERE course_id = $1`,
+			`SELECT capacity, COALESCE(current_student, '{}'::text[]), state
+			 FROM course WHERE course_id = $1 FOR UPDATE`,
 			courseID,
-		).Scan(&capacity, &currentStudents)
+		).Scan(&capacity, &currentStudents, &state)
 
 		if err != nil {
 			return EnrollmentResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Course ID %d not found", courseID),
+			}
+		}
+
+		// ตรวจสอบว่า course ถูกปิดหรือไม่
+		if state == "closed" {
+			return EnrollmentResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Course ID %d is closed", courseID),
 			}
 		}
 
