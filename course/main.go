@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sony/gobreaker"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -135,6 +136,55 @@ func connectToWriteDB() *pgx.Conn {
 	}
 
 	return conn
+}
+
+// connectToRabbitMQ เชื่อมต่อ RabbitMQ
+func connectToRabbitMQ() (*amqp.Connection, *amqp.Channel) {
+	rabbitURL := os.Getenv("RABBITMQ_URL")
+	if rabbitURL == "" {
+		rabbitURL = "amqp://guest:guest@localhost:5672/"
+	}
+
+	var rabbitConn *amqp.Connection
+	var err error
+	for i := 0; i < 5; i++ {
+		rabbitConn, err = amqp.Dial(rabbitURL)
+		if err == nil {
+			break
+		}
+		log.Printf("RabbitMQ not ready, retrying in 5s... (%d/5)", i+1)
+		time.Sleep(5 * time.Second)
+	}
+	if err != nil {
+		log.Fatal("RabbitMQ Connection Error:", err)
+	}
+
+	rabbitChannel, err := rabbitConn.Channel()
+	if err != nil {
+		log.Fatal("RabbitMQ Channel Error:", err)
+	}
+
+	// Declare request queue
+	_, err = rabbitChannel.QueueDeclare("course_enrollment_request", true, false, false, false, nil)
+	if err != nil {
+		log.Fatal("Queue Declaration Error:", err)
+	}
+
+	log.Println("Successfully connected to RabbitMQ (Course Service)")
+	return rabbitConn, rabbitChannel
+}
+
+// EnrollmentMessage ข้อมูลที่รับจาก enrollment service
+type EnrollmentMessage struct {
+	StudentID int   `json:"student_id"`
+	CourseIDs []int `json:"course_ids"`
+}
+
+// EnrollmentResponse ข้อมูลตอบกลับไปยัง enrollment service
+type EnrollmentResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
 }
 
 // สร้างประเภทตัวแปร
@@ -426,6 +476,151 @@ func SetupRouter(dbConns *DBConnections) *gin.Engine {
 	return r
 }
 
+// startEnrollmentConsumer รับข้อความจาก enrollment service
+func startEnrollmentConsumer(dbConn *pgx.Conn, rabbitChannel *amqp.Channel) {
+	msgs, err := rabbitChannel.Consume(
+		"course_enrollment_request", // queue
+		"",                          // consumer tag
+		false,                       // auto-ack
+		false,                       // exclusive
+		false,                       // no-local
+		false,                       // no-wait
+		nil,                         // args
+	)
+	if err != nil {
+		log.Fatal("Failed to register consumer:", err)
+	}
+
+	log.Println("Course Consumer: Waiting for enrollment requests...")
+
+	for d := range msgs {
+		var msg EnrollmentMessage
+		err := json.Unmarshal(d.Body, &msg)
+		if err != nil {
+			log.Printf("Error unmarshaling message: %v", err)
+			d.Nack(false, false)
+			continue
+		}
+
+		log.Printf("Received enrollment request: StudentID=%d, CourseIDs=%v", msg.StudentID, msg.CourseIDs)
+
+		// ประมวลผลการลงทะเบียน
+		response := processEnrollment(dbConn, msg)
+
+		// ส่ง response กลับ
+		responseBody, _ := json.Marshal(response)
+		err = rabbitChannel.PublishWithContext(context.Background(),
+			"",        // exchange
+			d.ReplyTo, // routing key (reply queue)
+			false,     // mandatory
+			false,     // immediate
+			amqp.Publishing{
+				ContentType:   "application/json",
+				CorrelationId: d.CorrelationId,
+				Body:          responseBody,
+			})
+
+		if err != nil {
+			log.Printf("Failed to send response: %v", err)
+			d.Nack(false, true)
+		} else {
+			log.Printf("Sent response: Success=%v, Message=%s", response.Success, response.Message)
+			d.Ack(false)
+		}
+	}
+}
+
+// processEnrollment ประมวลผลการลงทะเบียน
+func processEnrollment(dbConn *pgx.Conn, msg EnrollmentMessage) EnrollmentResponse {
+	ctx := context.Background()
+
+	// เริ่ม transaction
+	tx, err := dbConn.Begin(ctx)
+	if err != nil {
+		return EnrollmentResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to start transaction: %v", err),
+		}
+	}
+	defer tx.Rollback(ctx)
+
+	// ตรวจสอบและอัพเดทแต่ละ course
+	for _, courseID := range msg.CourseIDs {
+		var capacity int
+		var currentStudents []string
+
+		// ดึงข้อมูล course
+		err := tx.QueryRow(ctx,
+			`SELECT capacity, COALESCE(current_student, '{}'::text[]) FROM course WHERE course_id = $1`,
+			courseID,
+		).Scan(&capacity, &currentStudents)
+
+		if err != nil {
+			return EnrollmentResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Course ID %d not found", courseID),
+			}
+		}
+
+		// ตรวจสอบว่ามีที่นั่งเหลือหรือไม่
+		if len(currentStudents) >= capacity {
+			return EnrollmentResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Course ID %d is full", courseID),
+			}
+		}
+
+		// ตรวจสอบว่า student ลงวิชานี้ไปแล้วหรือยัง
+		studentIDStr := fmt.Sprintf("%d", msg.StudentID)
+		for _, existingStudent := range currentStudents {
+			if existingStudent == studentIDStr {
+				return EnrollmentResponse{
+					Success: false,
+					Error:   fmt.Sprintf("Student %d already enrolled in course %d", msg.StudentID, courseID),
+				}
+			}
+		}
+
+		// เพิ่ม student เข้า course
+		_, err = tx.Exec(ctx,
+			`UPDATE course SET current_student = array_append(current_student, $1) WHERE course_id = $2`,
+			studentIDStr, courseID,
+		)
+
+		if err != nil {
+			return EnrollmentResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to update course %d: %v", courseID, err),
+			}
+		}
+
+		// ถ้าเต็มแล้วให้ปิด course
+		if len(currentStudents)+1 >= capacity {
+			_, err = tx.Exec(ctx,
+				`UPDATE course SET state = 'closed' WHERE course_id = $1`,
+				courseID,
+			)
+			if err != nil {
+				log.Printf("Warning: Failed to close course %d: %v", courseID, err)
+			}
+		}
+	}
+
+	// Commit transaction
+	err = tx.Commit(ctx)
+	if err != nil {
+		return EnrollmentResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to commit transaction: %v", err),
+		}
+	}
+
+	return EnrollmentResponse{
+		Success: true,
+		Message: fmt.Sprintf("Successfully enrolled student %d in courses %v", msg.StudentID, msg.CourseIDs),
+	}
+}
+
 func main() {
 	registerConsul("course-service", 8000)
 
@@ -440,8 +635,15 @@ func main() {
 		WriteConn: writeConn,
 	}
 
-	r := SetupRouter(dbConns)
-	r.Run(":8000") // รันที่ localhost:8000
+	// เชื่อมต่อ RabbitMQ
+	rabbitConn, rabbitChannel := connectToRabbitMQ()
+	defer rabbitConn.Close()
+	defer rabbitChannel.Close()
 
-	fmt.Println("Course Service started on port 8000") // เช็ค
+	// เริ่ม consumer สำหรับรับข้อความจาก enrollment
+	go startEnrollmentConsumer(writeConn, rabbitChannel)
+
+	r := SetupRouter(dbConns)
+	log.Println("Course Service started on port 8000")
+	r.Run(":8000") // รันที่ localhost:8000
 }

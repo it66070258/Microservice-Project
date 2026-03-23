@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -97,6 +96,12 @@ type EnrollmentRequest struct {
 	CourseIDs []int `json:"course_ids" binding:"required"`
 }
 
+type EnrollmentResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
+}
+
 type CourseDB struct {
 	ID              int
 	Credit          int
@@ -108,8 +113,6 @@ type CourseDB struct {
 	EndTime         time.Time
 	State           string
 }
-
-const queueName = "enrollment_queue"
 
 type DBConnections struct {
 	ReadConn  *sql.DB
@@ -175,12 +178,82 @@ func connectToRabbitMQ() (*amqp.Connection, *amqp.Channel) {
 		log.Fatal("RabbitMQ Channel Error:", err)
 	}
 
-	_, err = rabbitChannel.QueueDeclare(queueName, true, false, false, false, nil)
+	log.Println("Successfully connected to RabbitMQ (Enrollment Service)")
+	return rabbitConn, rabbitChannel
+}
+
+// sendRPCRequestToCourse ส่ง RPC request ไปยัง course service และรอ response
+func sendRPCRequestToCourse(rabbitChannel *amqp.Channel, req EnrollmentRequest, timeout time.Duration) (*EnrollmentResponse, error) {
+	// สร้าง reply queue แบบชั่วคราว
+	replyQueue, err := rabbitChannel.QueueDeclare(
+		"",    // name (empty = auto-generated)
+		false, // durable
+		true,  // auto-delete
+		true,  // exclusive
+		false, // no-wait
+		nil,   // args
+	)
 	if err != nil {
-		log.Fatal("Queue Declaration Error:", err)
+		return nil, fmt.Errorf("failed to declare reply queue: %v", err)
 	}
 
-	return rabbitConn, rabbitChannel
+	// รับข้อความจาก reply queue
+	msgs, err := rabbitChannel.Consume(
+		replyQueue.Name, // queue
+		"",              // consumer
+		true,            // auto-ack
+		false,           // exclusive
+		false,           // no-local
+		false,           // no-wait
+		nil,             // args
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register consumer: %v", err)
+	}
+
+	// สร้าง correlation ID
+	correlationID := fmt.Sprintf("%d-%d", req.StudentID, time.Now().UnixNano())
+
+	// เตรียมข้อความ
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	// ส่ง request
+	err = rabbitChannel.PublishWithContext(context.Background(),
+		"",                          // exchange
+		"course_enrollment_request", // routing key
+		false,                       // mandatory
+		false,                       // immediate
+		amqp.Publishing{
+			ContentType:   "application/json",
+			CorrelationId: correlationID,
+			ReplyTo:       replyQueue.Name,
+			Body:          body,
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to publish request: %v", err)
+	}
+
+	log.Printf("RPC: Sent request to course service (CorrelationID: %s)", correlationID)
+
+	// รอ response พร้อม timeout
+	select {
+	case d := <-msgs:
+		if d.CorrelationId == correlationID {
+			var response EnrollmentResponse
+			err := json.Unmarshal(d.Body, &response)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+			}
+			log.Printf("RPC: Received response from course service: Success=%v", response.Success)
+			return &response, nil
+		}
+		return nil, fmt.Errorf("received response with wrong correlation ID")
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout waiting for response from course service")
+	}
 }
 
 func SetupRouter(dbConns *DBConnections, rabbitChannel *amqp.Channel) *gin.Engine {
@@ -201,17 +274,6 @@ func SetupRouter(dbConns *DBConnections, rabbitChannel *amqp.Channel) *gin.Engin
 	}
 	readCircuitBreaker := gobreaker.NewCircuitBreaker(readSettings)
 
-	writeSettings := gobreaker.Settings{
-		Name:        "Database-Write-Operations",
-		MaxRequests: 3,
-		Interval:    5 * time.Second,
-		Timeout:     5 * time.Second,
-		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			return counts.ConsecutiveFailures > 2
-		},
-	}
-	writeCircuitBreaker := gobreaker.NewCircuitBreaker(writeSettings)
-
 	r.POST("/enroll", func(c *gin.Context) {
 		var req EnrollmentRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -219,101 +281,100 @@ func SetupRouter(dbConns *DBConnections, rabbitChannel *amqp.Channel) *gin.Engin
 			return
 		}
 
+		// ตรวจสอบว่าสามารถลงทะเบียนได้หรือไม่
 		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
 			return canEnroll(dbConns.ReadConn, req.StudentID, req.CourseIDs)
 		})
 
 		if err != nil {
 			if err == gobreaker.ErrOpenState {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "ระบบขดของชวคราว (Circuit Breaker Open)"})
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "ระบบขัดข้องชั่วคราว (Circuit Breaker Open)"})
 				return
 			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		body, _ := json.Marshal(req)
-		_, err = writeCircuitBreaker.Execute(func() (interface{}, error) {
-			return nil, rabbitChannel.PublishWithContext(context.Background(), "", queueName, false, false, amqp.Publishing{
-				DeliveryMode: amqp.Persistent,
-				ContentType:  "application/json",
-				Body:         body,
-			})
-		})
+		// ลองส่ง request และ retry หากล้มเหลว
+		maxRetries := 3
+		var lastErr error
 
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไมสามารถสงขอมลเขาควได"})
+		for retry := 0; retry < maxRetries; retry++ {
+			if retry > 0 {
+				log.Printf("Retry %d/%d for student %d", retry, maxRetries, req.StudentID)
+				time.Sleep(time.Duration(retry) * 2 * time.Second) // exponential backoff
+			}
+
+			// เริ่ม transaction
+			tx, err := dbConns.WriteConn.Begin()
+			if err != nil {
+				lastErr = fmt.Errorf("failed to start transaction: %v", err)
+				continue
+			}
+
+			// บันทึกข้อมูลลงทะเบียนใน enrollment table
+			var exists bool
+			err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM enrollment WHERE student_id = $1)", req.StudentID).Scan(&exists)
+			if err != nil {
+				tx.Rollback()
+				lastErr = fmt.Errorf("failed to check enrollment existence: %v", err)
+				continue
+			}
+
+			if exists {
+				_, err = tx.Exec("UPDATE enrollment SET course_id = array_cat(course_id, $1) WHERE student_id = $2", pq.Array(req.CourseIDs), req.StudentID)
+			} else {
+				_, err = tx.Exec("INSERT INTO enrollment (student_id, course_id) VALUES ($1, $2)", req.StudentID, pq.Array(req.CourseIDs))
+			}
+
+			if err != nil {
+				tx.Rollback()
+				lastErr = fmt.Errorf("failed to insert enrollment: %v", err)
+				continue
+			}
+
+			// ส่ง RPC request ไปยัง course service
+			response, err := sendRPCRequestToCourse(rabbitChannel, req, 10*time.Second)
+
+			if err != nil {
+				// Rollback transaction เพราะ course service ไม่ตอบกลับ
+				tx.Rollback()
+				lastErr = fmt.Errorf("course service error: %v", err)
+				log.Printf("Transaction rolled back: %v", err)
+				continue
+			}
+
+			if !response.Success {
+				// Rollback เพราะ course service ตอบว่าไม่สำเร็จ
+				tx.Rollback()
+				lastErr = fmt.Errorf("course service failed: %s", response.Error)
+				log.Printf("Transaction rolled back: %s", response.Error)
+				continue
+			}
+
+			// Commit transaction เพราะทุกอย่างสำเร็จ
+			err = tx.Commit()
+			if err != nil {
+				lastErr = fmt.Errorf("failed to commit transaction: %v", err)
+				continue
+			}
+
+			log.Printf("Successfully enrolled student %d in courses %v", req.StudentID, req.CourseIDs)
+			c.JSON(http.StatusOK, gin.H{
+				"message": "ลงทะเบียนสำเร็จ",
+				"details": response.Message,
+			})
 			return
 		}
 
-		c.JSON(http.StatusAccepted, gin.H{"message": "รบคำขอลงทะเบยนเรยบรอยแลว กำลงดำเนนการ..."})
+		// หากลองทั้งหมดแล้วยังไม่สำเร็จ
+		log.Printf("Failed to enroll student %d after %d retries: %v", req.StudentID, maxRetries, lastErr)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("ไม่สามารถลงทะเบียนได้หลังจากลอง %d ครั้ง: %v", maxRetries, lastErr),
+		})
 	})
 
 	return r
-}
-
-func startWorker(db *sql.DB, rabbitChannel *amqp.Channel) {
-	msgs, err := rabbitChannel.Consume(queueName, "", false, false, false, false, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for d := range msgs {
-		var req EnrollmentRequest
-		json.Unmarshal(d.Body, &req)
-
-		log.Printf("Worker: กำลงประมวลผลการลงทะเบยน นกเรยนรหส %d", req.StudentID)
-
-		err := processTransaction(db, req)
-		if err != nil {
-			log.Printf("Worker Error: %v", err)
-			d.Nack(false, true)
-		} else {
-			log.Printf("Worker Success: นกเรยนรหส %d ลงทะเบยนสำเรจ", req.StudentID)
-			d.Ack(false)
-		}
-	}
-}
-
-func processTransaction(db *sql.DB, req EnrollmentRequest) error {
-	courses, err := canEnroll(db, req.StudentID, req.CourseIDs)
-	if err != nil {
-		return err
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	for _, crs := range courses {
-		_, err = tx.Exec("UPDATE course SET current_student = array_append(current_student, $1) WHERE course_id = $2", strconv.Itoa(req.StudentID), crs.ID)
-		if err != nil {
-			return err
-		}
-
-		if len(crs.CurrentStudents)+1 >= crs.Capacity {
-			_, err = tx.Exec("UPDATE course SET state = 'closed' WHERE course_id = $1", crs.ID)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	var exists bool
-	tx.QueryRow("SELECT EXISTS(SELECT 1 FROM enrollment WHERE student_id = $1)", req.StudentID).Scan(&exists)
-
-	if exists {
-		_, err = tx.Exec("UPDATE enrollment SET course_id = array_cat(course_id, $1) WHERE student_id = $2", pq.Array(req.CourseIDs), req.StudentID)
-	} else {
-		_, err = tx.Exec("INSERT INTO enrollment (student_id, course_id) VALUES ($1, $2)", req.StudentID, pq.Array(req.CourseIDs))
-	}
-
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func canEnroll(db *sql.DB, studentID int, ids []int) ([]CourseDB, error) {
@@ -464,8 +525,6 @@ func main() {
 	rabbitConn, rabbitChannel := connectToRabbitMQ()
 	defer rabbitConn.Close()
 	defer rabbitChannel.Close()
-
-	go startWorker(dbConns.WriteConn, rabbitChannel)
 
 	r := SetupRouter(dbConns, rabbitChannel)
 
