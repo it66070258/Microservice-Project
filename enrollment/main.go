@@ -92,8 +92,6 @@ func PrometheusMiddleware() gin.HandlerFunc {
 	}
 }
 
-// --- โครงสรางขอมล ---
-
 type EnrollmentRequest struct {
 	StudentID int   `json:"student_id" binding:"required"`
 	CourseIDs []int `json:"course_ids" binding:"required"`
@@ -106,8 +104,8 @@ type CourseDB struct {
 	CurrentStudents []string
 	Prerequisite    []string
 	DayOfWeek       string
-	StartTime       string
-	EndTime         string
+	StartTime       time.Time
+	EndTime         time.Time
 	State           string
 }
 
@@ -214,21 +212,6 @@ func SetupRouter(dbConns *DBConnections, rabbitChannel *amqp.Channel) *gin.Engin
 	}
 	writeCircuitBreaker := gobreaker.NewCircuitBreaker(writeSettings)
 
-	r.GET("/health", func(c *gin.Context) {
-		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
-			return nil, dbConns.ReadConn.Ping()
-		})
-		if err != nil {
-			if err == gobreaker.ErrOpenState {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "db_error": "Circuit Breaker Open"})
-				return
-			}
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "db_error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
-	})
-
 	r.POST("/enroll", func(c *gin.Context) {
 		var req EnrollmentRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -334,11 +317,135 @@ func processTransaction(db *sql.DB, req EnrollmentRequest) error {
 }
 
 func canEnroll(db *sql.DB, studentID int, ids []int) ([]CourseDB, error) {
-	var results []CourseDB
-	for _, id := range ids {
-		results = append(results, CourseDB{ID: id, Capacity: 30, State: "open"})
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("ไม่มีรายวิชาที่ต้องลงทะเบียน")
 	}
-	return results, nil
+
+	// 1. ดึงข้อมูลนักเรียนเพื่อตรวจสอบวิชาที่ผ่านแล้ว (Prerequisite)
+	var gradedSubjects pq.StringArray
+	err := db.QueryRow("SELECT COALESCE(graded_subject, '{}'::text[]) FROM student WHERE student_id = $1", studentID).Scan(pq.Array(&gradedSubjects))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("ไม่พบข้อมูลนักเรียนรหัส %d ในระบบ", studentID)
+		}
+		return nil, fmt.Errorf("เกิดข้อผิดพลาดในการดึงข้อมูลนักเรียน: %v", err)
+	}
+
+	gradedMap := make(map[string]bool)
+	for _, sub := range gradedSubjects {
+		gradedMap[sub] = true
+	}
+
+	// 2. ดึงข้อมูลวิชาที่ร้องขอลงทะเบียนใหม่ (ตรวจสอบ Capacity / State / Prerequisite)
+	var newCourses []CourseDB
+	rows, err := db.Query(`SELECT course_id, credit, capacity, COALESCE(current_student, '{}'::text[]), COALESCE(prerequisite, '{}'::text[]), day_of_week, start_time, end_time, state 
+		FROM course WHERE course_id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("เกิดข้อผิดพลาดในการดึงข้อมูลรายวิชา: %v", err)
+	}
+	defer rows.Close()
+
+	uniqueCheck := make(map[int]bool)
+	totalNewCredit := 0
+
+	for rows.Next() {
+		var c CourseDB
+		var currentStudents, prerequisites pq.StringArray
+		if err := rows.Scan(&c.ID, &c.Credit, &c.Capacity, &currentStudents, &prerequisites, &c.DayOfWeek, &c.StartTime, &c.EndTime, &c.State); err != nil {
+			return nil, fmt.Errorf("เกิดข้อผิดพลาดในการอ่านข้อมูลวิชา: %v", err)
+		}
+		c.CurrentStudents = currentStudents
+		c.Prerequisite = prerequisites
+
+		// ป้องกันการส่งรายวิชาเดิมเบิ้ลมาใน Request เดียวกัน
+		if uniqueCheck[c.ID] {
+			return nil, fmt.Errorf("ไม่อนุญาตให้ระบุวิชารหัส %d ซ้ำกันในคำขอเดียว", c.ID)
+		}
+		uniqueCheck[c.ID] = true
+
+		if c.State == "closed" {
+			return nil, fmt.Errorf("วิชารหัส %d ปิดรับลงทะเบียนแล้ว (State: Closed)", c.ID)
+		}
+		if len(c.CurrentStudents) >= c.Capacity {
+			return nil, fmt.Errorf("วิชารหัส %d ที่นั่งเต็มแล้ว (%d/%d)", c.ID, len(c.CurrentStudents), c.Capacity)
+		}
+		for _, reqSub := range c.Prerequisite {
+			if !gradedMap[reqSub] {
+				return nil, fmt.Errorf("นักเรียนยังไม่ผ่านวิชาบังคับก่อนหน้า (%s) สำหรับวิชารหัส %d", reqSub, c.ID)
+			}
+		}
+
+		newCourses = append(newCourses, c)
+		totalNewCredit += c.Credit
+	}
+
+	if len(newCourses) != len(ids) {
+		return nil, fmt.Errorf("มีรายวิชาที่ระบุไม่ถูกต้องหรือไม่มีอยู่จริงในระบบ")
+	}
+
+	// 3. ดึงประวัติที่ลงไปแล้วของนักเรียน เพื่อเช็คหน่วยกิตรวม, เวลาชน, ป้องกันการลงวิชาเดิมซ้ำ
+	var existingCourseIDsInt64 []int64
+	err = db.QueryRow("SELECT COALESCE(course_id, '{}'::int[]) FROM enrollment WHERE student_id = $1", studentID).Scan(pq.Array(&existingCourseIDsInt64))
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("เกิดข้อผิดพลาดในการดึงประวัติการลงทะเบียน: %v", err)
+	}
+
+	var existingCourses []CourseDB
+	totalExistingCredit := 0
+
+	if len(existingCourseIDsInt64) > 0 {
+		eRows, err := db.Query(`SELECT course_id, credit, day_of_week, start_time, end_time 
+			FROM course WHERE course_id = ANY($1)`, pq.Array(existingCourseIDsInt64))
+		if err != nil {
+			return nil, fmt.Errorf("เกิดข้อผิดพลาดในการดึงข้อมูลวิชาที่เคยลง: %v", err)
+		}
+		defer eRows.Close()
+
+		for eRows.Next() {
+			var c CourseDB
+			if err := eRows.Scan(&c.ID, &c.Credit, &c.DayOfWeek, &c.StartTime, &c.EndTime); err != nil {
+				return nil, fmt.Errorf("เกิดข้อผิดพลาดในการอ่านข้อมูลวิชาที่เคยลง: %v", err)
+			}
+
+			// เช็คว่าวิชาที่ขอใหม่ ไปซ้ำกับวิชาที่เคยมีในตารางแล้วหรือไม่
+			if uniqueCheck[c.ID] {
+				return nil, fmt.Errorf("วิชารหัส %d เคยได้รับการลงทะเบียนและบันทึกไว้ในระบบแล้ว", c.ID)
+			}
+
+			existingCourses = append(existingCourses, c)
+			totalExistingCredit += c.Credit
+		}
+	}
+
+	// 4. ตรวจสอบเงื่อนไขลงทะเบียนเกิน 21 หน่วยกิต
+	if totalNewCredit+totalExistingCredit > 21 {
+		return nil, fmt.Errorf("หน่วยกิตการลงทะเบียนรวมเกิน 21 (ปัจจุบันมี %d หน่วยกิต, ขอเพิ่มใหม่ %d หน่วยกิต)", totalExistingCredit, totalNewCredit)
+	}
+
+	// 5. ตรวจสอบการทับซ้อนของตารางเรียน (Schedule Overlap) ระหว่างวิชาเดิมและวิชาใหม่
+	allClasses := append(existingCourses, newCourses...)
+	for i := 0; i < len(allClasses); i++ {
+		for j := i + 1; j < len(allClasses); j++ {
+			c1 := allClasses[i]
+			c2 := allClasses[j]
+
+			if c1.DayOfWeek != "" && c1.DayOfWeek == c2.DayOfWeek {
+				// แปลงเวลาให้เป็นรูปแบบ HH:MM:SS เพื่อการเปรียบเทียบ string ปกติ (ปลอดภัยสำหรับเวลา 24 ชั่วโมง)
+				s1 := c1.StartTime.Format("15:04:05")
+				e1 := c1.EndTime.Format("15:04:05")
+				s2 := c2.StartTime.Format("15:04:05")
+				e2 := c2.EndTime.Format("15:04:05")
+
+				// เงื่อนไขเวลาครอบเกี่ยวกัน (Start1 < End2 และ End1 > Start2)
+				if s1 < e2 && e1 > s2 {
+					return nil, fmt.Errorf("เวลาเรียนทับซ้อนกันวัน %s: วิชารหัส %d (%s-%s) ชนกับ วิชารหัส %d (%s-%s)",
+						c1.DayOfWeek, c1.ID, s1, e1, c2.ID, s2, e2)
+				}
+			}
+		}
+	}
+
+	return newCourses, nil
 }
 
 func main() {
@@ -362,6 +469,6 @@ func main() {
 
 	r := SetupRouter(dbConns, rabbitChannel)
 
-	log.Println("Enrollment Service เรมทำงานทพอรต :8002")
+	log.Println("Enrollment Service เริ่มทำงานที่พอร์ต :8002")
 	r.Run(":8002")
 }
