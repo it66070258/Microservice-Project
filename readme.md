@@ -43,6 +43,9 @@
 10. **RPC (Remote Procedure Call) Pattern**:
     - มีการออกแบบการสื่อสารระหว่าง Microservices ด้วยรูปแบบ RPC เพื่อให้แต่ละเซอร์วิสสามารถเรียกใช้งานบริการของเซอร์วิสอื่นได้อย่างรวดเร็วและเป็นระบบ
 
+11. **CQRS (Command and Query Responsibility Segregation)**:
+    - มีการแยกส่วนการทำงานระหว่างการจัดการเปลี่ยนแปลงข้อมูล (Command - Create, Update, Delete) และการดึงข้อมูล (Query - Read) ออกจากกัน เพื่อการจัดการฐานข้อมูลที่มีประสิทธิภาพและรองรับการขยายตัวของระบบ
+
 ---
 
 ## 🚀 คู่มือการใช้งาน
@@ -61,6 +64,7 @@
 ```bash
 https://github.com/it66070258/Microservice-Project.git
 ```
+
 ```bash
 docker compose up -d --build
 ```
@@ -183,6 +187,7 @@ _เพิ่มเติม Query ที่น่าสนใจ:_
 ```promql
 rate(http_request_duration_seconds_sum[1m])
 ```
+
 ```promql
 rate(http_request_duration_seconds_count[1m])
 ```
