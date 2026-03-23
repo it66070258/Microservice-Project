@@ -384,7 +384,7 @@ func canEnroll(db *sql.DB, studentID int, ids []int) ([]CourseDB, error) {
 
 	// 1. ดึงข้อมูลนักเรียนเพื่อตรวจสอบวิชาที่ผ่านแล้ว (Prerequisite)
 	var gradedSubjects pq.StringArray
-	err := db.QueryRow("SELECT COALESCE(graded_subject, '{}'::text[]) FROM student WHERE student_id = $1", studentID).Scan(pq.Array(&gradedSubjects))
+	err := db.QueryRow("SELECT COALESCE(graded_subject, '{}'::varchar[]) FROM student WHERE student_id = $1", studentID).Scan(&gradedSubjects)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("ไม่พบข้อมูลนักเรียนรหัส %d ในระบบ", studentID)
@@ -399,7 +399,7 @@ func canEnroll(db *sql.DB, studentID int, ids []int) ([]CourseDB, error) {
 
 	// 2. ดึงข้อมูลวิชาที่ร้องขอลงทะเบียนใหม่ (ตรวจสอบ Capacity / State / Prerequisite)
 	var newCourses []CourseDB
-	rows, err := db.Query(`SELECT course_id, credit, capacity, COALESCE(current_student, '{}'::text[]), COALESCE(prerequisite, '{}'::text[]), day_of_week, start_time, end_time, state 
+	rows, err := db.Query(`SELECT course_id, credit, capacity, COALESCE(current_student, '{}'::varchar[]), COALESCE(prerequisite, '{}'::varchar[]), day_of_week, start_time, end_time, state
 		FROM course WHERE course_id = ANY($1)`, pq.Array(ids))
 	if err != nil {
 		return nil, fmt.Errorf("เกิดข้อผิดพลาดในการดึงข้อมูลรายวิชา: %v", err)
