@@ -37,6 +37,12 @@
    - มีการบิวต์ Docker ด้วยแนวคิด **Multi-stage Build** (Go Build Stage > Alpine Run Stage) ซึ่งขนาดได้ Image file สุดท้ายของ Service ที่เล็กและปลอดภัย
    - ผสานการสั่งการทุกคอนเทนเนอร์เข้าด้วยกันพร้อมระบบ Network ที่เชื่อมกันผ่านคำสั่ง `docker compose` เพียงอย่างเดียว
 
+9. **Race Condition Handling**:
+   - มีการจัดการปัญหา Race Condition เพื่อป้องกันความผิดพลาดเมื่อมีคำร้องขอเข้ามาทำงานกับข้อมูลเดียวกันพร้อมๆ กัน (เช่น การลงทะเบียนและหักโควต้าที่นั่ง)
+
+10. **RPC (Remote Procedure Call) Pattern**:
+    - มีการออกแบบการสื่อสารระหว่าง Microservices ด้วยรูปแบบ RPC เพื่อให้แต่ละเซอร์วิสสามารถเรียกใช้งานบริการของเซอร์วิสอื่นได้อย่างรวดเร็วและเป็นระบบ
+
 ---
 
 ## 🚀 คู่มือการใช้งาน
@@ -58,28 +64,135 @@ https://github.com/it66070258/Microservice-Project.git
 docker compose up -d --build
 ```
 
-### 3. ตรวจสอบพอร์ตและการทำงาน
+### 3. การทดสอบใช้งานส่งคำสั่ง API
 
-เมื่อคอนเทนเนอร์ทั้งหมดทำงาน สามารถเข้าถึงเซอร์วิสต่างๆ ได้ตามพอร์ตด้านล่าง:
+หลังจากระบบเริ่มต้นสำเร็จ (รวมถึงจัดการ Seed Database ของ Postgres เรียบร้อยแล้ว) สามารถทดสอบยิง API คร่าวๆ ได้ดังนี้ (ด้วยโปรแกรมอย่าง Postman, cURL หรือ Thunder Client):
 
-- 🌐 **Course Service Endpoint**: `http://localhost:8000`
-- 🌐 **Student Service Endpoint**: `http://localhost:8001`
-- 🌐 **Enrollment Service Endpoint**: `http://localhost:8002`
+**🌐 Course Service (จัดการรายวิชา)**
 
-เครื่องมือช่วยเหลืออื่นๆ (Tools / UI):
+- ดึงรายการวิชาทั้งหมด: `GET http://localhost:8000/courses`
+- ดึงข้อมูลวิชารหัส 9: `GET http://localhost:8000/courses/9`
+- แก้ไขข้อมูลวิชา: `PUT http://localhost:8000/courses/9`
+  ```json
+  {
+    "subject": "Advanced Mathematics",
+    "capacity": 50,
+    "state": "closed"
+  }
+  ```
+- เพิ่มรายวิชาใหม่: `POST http://localhost:8000/courses`
+  ```json
+  {
+    "course_id": 19,
+    "subject": "Chemistry",
+    "credit": 3,
+    "section": ["1", "2"],
+    "day_of_week": "Thursday",
+    "start_time": "09:00:00",
+    "end_time": "12:00:00",
+    "capacity": 40,
+    "state": "open",
+    "prerequisite": null
+  }
+  ```
+- ลบรายวิชา: `DELETE http://localhost:8000/courses/9`
 
-- 📊 **Grafana Dashboard**: `http://localhost:3000` _(User: admin / Pass: admin)_
+**🌐 Student Service (จัดการนักศึกษา)**
+
+- ดูข้อมูลนักศึกษาทั้งหมด: `GET http://localhost:8001/students`
+- ดูข้อมูลนักศึกษารหัส 2: `GET http://localhost:8001/students/2`
+- สมัครสมาชิก: `POST http://localhost:8001/register`
+  ```json
+  {
+    "student_id": 101,
+    "first_name": "Somsak",
+    "last_name": "Meedee",
+    "email": "somsak.m@example.com",
+    "password": "password123",
+    "birthdate": "2005-01-01",
+    "gender": "Male",
+    "year_level": 1,
+    "graded_subject": ["Mathematics", "Physics"]
+  }
+  ```
+- เข้าสู่ระบบ: `POST http://localhost:8001/login`
+  ```json
+  {
+    "email": "somsak.m@example.com",
+    "password": "password123"
+  }
+  ```
+- ดูโปรไฟล์ปัจจุบัน: `GET http://localhost:8001/profile`
+- แก้ไขโปรไฟล์: `PUT http://localhost:8001/profile`
+  ```json
+  {
+    "first_name": "Somsak-Update",
+    "last_name": "Meedee-New",
+    "birthdate": "2005-01-01",
+    "gender": "Male",
+    "year_level": 2
+  }
+  ```
+- ออกจากระบบ: `POST http://localhost:8001/logout`
+
+**🌐 Enrollment Service (ระบบลงทะเบียน)**
+
+- ซื้อขาย/ลงทะเบียนรายวิชา: `POST http://localhost:8002/enroll`
+  ```json
+  {
+    "student_id": 1,
+    "course_ids": [15]
+  }
+  ```
+
+### 4. การทดสอบ Monitoring (Prometheus & Grafana)
+
+**4.1 สร้างข้อมูลเพื่อจำลอง Request (Refresh หลายๆ ครั้งเพื่อสร้าง Traffic)**
+ให้เรียกไปที่ API ต่างๆ ของระบบที่ได้เพิ่มระบบจับ Metric ไว้แล้ว (สามารถเปิดใน Browser หรือใช้ Postman) Refresh แต่ละหน้าสัก 5-10 รอบ โดยเฉพาะตัวอย่างเหล่านี้:
+
+- ระบบแสดงรายวิชา: `http://localhost:8000/courses`
+- ระบบข้อมูลคลาสเรียน: `http://localhost:8000/courses/1`
+- ระบบนักเรียน: `http://localhost:8001/students`
+
+**4.2 ตั้งค่าการดึงข้อมูลใน Grafana**
+
+- เปิด Browser เข้าไปที่ `http://localhost:3000` (Grafana)
+- ใส่ User: `admin` และ Pass: `admin`
+- ในหน้าแรก ไปที่ **Connections** > แล้วเลือก **Data Sources**
+- คลิก **Add data source**
+- เลือก **Prometheus**
+- ในช่อง Prometheus server URL: ให้ใส่ `http://prometheus:9090/` _(สำคัญ: เนื่องจากมันอยู่ใน Docker Network เดียวกัน ต้องเรียกชื่อ service ว่า prometheus ไม่ใช่ localhost)_
+- เลื่อนลงมาด้านล่างสุดและกดปุ่ม **Save & test** (ถ้าสำเร็จจะขึ้นกล่องสีเขียวว่า "Data source is working")
+
+**4.3 สร้าง Dashboard เพื่อดูกราฟ**
+
+- ที่เมนูด้านซ้าย เลือกไอคอนเครื่องหมายบวก (+) > และคลิก **Dashboard**
+- เลือก **Add visualization** และเลือก Data base Prometheus
+- ที่ช่องกรอก Metrics / Query ลองใส่ Query ดังต่อไปนี้เพื่อแสดงข้อมูล Requests ต่อนาที:
+  ```promql
+  rate(http_requests_total[1m])
+  ```
+  _(สังเกตว่าชื่อ Metric ของระบบเราตอนนี้คือ `http_requests_total` จะต่างจากตัวอย่างในแลปที่คุณส่งมาที่ชื่อว่า `myapp_http_requests_total`)_
+- กดปุ่ม **Run query**
+- จะเห็นกราฟ Traffic ที่ดึงมาจากทั้ง 3 services (course-service, student-service, enrollment-service) แยกเป็นสีๆ โชว์ขึ้นมาบนหน้าจอ
+
+_เพิ่มเติม Query ที่น่าสนใจ:_
+ถ้าอยากดูกราฟเวลาการตอบสนองของเซิฟเวอร์ (Response Time) สามารถใช้ค่านี้แทน:
+
+```promql
+rate(http_request_duration_seconds_sum[1m])
+rate(http_request_duration_seconds_count[1m])
+```
+
+### 5. เครื่องมือช่วยเหลืออื่นๆ
+
 - 📈 **Prometheus UI**: `http://localhost:9090`
 - 🐇 **RabbitMQ Management**: `http://localhost:15672` _(User: guest / Pass: guest)_
 - 🟢 **Consul UI**: `http://localhost:8500`
 
-### 4. ทดสอบใช้งานส่งคำสั่ง API
+### 6. การปิดการทำงานของระบบ
 
-หลังจากระบบเริ่มต้นสำเร็จ (รวมถึงจัดการ Seed Database ของ Postgres เรียบร้อยแล้ว) สามารถทดสอบยิง API:
-
-### 5. การปิดการทำงานของระบบ
-
-หากทดสอบเสร็จแล้ว และต้องการลบการทำงานและล้างข้อมูลฐานข้อมูลปัจจุบัน ให้ใช้คำสั่ง:
+หลังทดสอบเสร็จแล้ว และต้องการลบการทำงานและล้างข้อมูลฐานข้อมูลปัจจุบัน ให้ใช้คำสั่ง:
 
 ```bash
 docker compose down -v
