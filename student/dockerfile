@@ -1,28 +1,26 @@
 # ---- Build Stage ----
-FROM golang:1.25-alpine AS builder
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
-# Copy go.mod และ go.sum เพื่อทำการ download dependencies ก่อน (ช่วยให้ build เร็วขึ้นในครั้งต่อไป)
+# Copy go.mod และ go.sum (layer caching)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code ทั้งหมดของ student service
+# Copy source code ทั้งหมดใน student/
 COPY . .
 
-# Build binary โดยตั้งชื่อว่า student-service
+# Build binary (CGO_ENABLED=0 เพื่อให้ได้ static binary ที่รันบน alpine ได้)
 RUN CGO_ENABLED=0 GOOS=linux go build -o student-service .
 
-# ---- Run Stage (ตัวจริงที่จะเอาไปใช้งาน) ----
+# ---- Run Stage ----
 FROM alpine:latest
 
 WORKDIR /app
 
-# Copy binary จาก builder stage มาที่นี่
+# Copy binary จาก build stage
 COPY --from=builder /app/student-service .
 
-# Student Service ของคุณรันที่พอร์ต 8001
 EXPOSE 8001
 
-# สั่งรันไฟล์
 CMD ["./student-service"]

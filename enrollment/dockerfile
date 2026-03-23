@@ -1,19 +1,16 @@
 # ---- Build Stage ----
-FROM golang:1.25-alpine AS builder
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
-# ติดตั้ง git เนื่องจากบาง library ใน go mod ต้องใช้
-RUN apk add --no-cache git
-
-# คัดลอกเฉพาะไฟล์ mod ก่อนเพื่อทำ caching layer
+# Copy go.mod และ go.sum (layer caching)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# คัดลอกโค้ดที่เหลือ
+# Copy source code ทั้งหมดใน enrollment/
 COPY . .
 
-# Build เป็น binary
+# Build binary (CGO_ENABLED=0 เพื่อให้ได้ static binary ที่รันบน alpine ได้)
 RUN CGO_ENABLED=0 GOOS=linux go build -o enrollment-service .
 
 # ---- Run Stage ----
@@ -21,10 +18,9 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# คัดลอก binary มาจาก stage builder
+# Copy binary จาก build stage
 COPY --from=builder /app/enrollment-service .
 
-# เปิดพอร์ตให้ตรงกับ Gin (8002)
 EXPOSE 8002
 
 CMD ["./enrollment-service"]
