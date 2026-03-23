@@ -13,7 +13,6 @@
       - ./student/db/schema.sql:/docker-entrypoint-initdb.d/03-student-schema.sql
       - ./student/db/seed.sql:/docker-entrypoint-initdb.d/04-student-seed.sql
       - ./enrollment/db/schema.sql:/docker-entrypoint-initdb.d/05-enrollment-schema.sql
-      - ./enrollment/db/seed.sql:/docker-entrypoint-initdb.d/06-enrollment-seed.sql
     ports:
       - "5432:5432"
     networks:

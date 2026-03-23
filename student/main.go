@@ -370,8 +370,8 @@ func SetupRouter(dbConns *DBConnections) *gin.Engine {
 
 			_, err := writeCircuitBreaker.Execute(func() (interface{}, error) {
 				return dbConns.WriteConn.Exec(context.Background(),
-					`UPDATE student SET first_name=$1, last_name=$2, birthdate=$3, gender=$4, year_level=$5 WHERE student_id=$6`,
-					up.FirstName, up.LastName, up.Birthdate, up.Gender, up.YearLevel, userID,
+					`UPDATE student SET first_name=$1, last_name=$2, birthdate=$3, gender=$4, year_level=$5, graded_subject=$6 WHERE student_id=$7`,
+					up.FirstName, up.LastName, up.Birthdate, up.Gender, up.YearLevel, up.GradedSubject, userID,
 				)
 			})
 
