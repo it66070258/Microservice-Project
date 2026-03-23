@@ -65,12 +65,15 @@
     environment:
       DB_READ_HOST: postgres
       DB_WRITE_HOST: postgres
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
     ports:
       - "8000:8000"
     networks:
       - monitoring
     depends_on:
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   student-service:
