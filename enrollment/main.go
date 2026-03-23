@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"bytes"
@@ -92,7 +92,7 @@ func PrometheusMiddleware() gin.HandlerFunc {
 	}
 }
 
-// --- โครงสร้างข้อมูล ---
+// --- โครงสรางขอมล ---
 
 type EnrollmentRequest struct {
 	StudentID int   `json:"student_id" binding:"required"`
@@ -111,45 +111,55 @@ type CourseDB struct {
 	State           string
 }
 
-type StudentDB struct {
-	GradedSubjects []string
-}
-
-// --- ตัวแปร Global ---
-
-var (
-	db            *sql.DB
-	cb            *gobreaker.CircuitBreaker
-	rabbitConn    *amqp.Connection
-	rabbitChannel *amqp.Channel
-)
-
 const queueName = "enrollment_queue"
 
-func main() {
-	registerConsul("enrollment-service", 8002)
+type DBConnections struct {
+	ReadConn  *sql.DB
+	WriteConn *sql.DB
+}
 
-	var err error
-
-	// 1. เชื่อมต่อ Database
-	host := os.Getenv("DB_HOST")
+func connectToReadDB() *sql.DB {
+	host := os.Getenv("DB_READ_HOST")
 	if host == "" {
 		host = "localhost"
 	}
 	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
-	db, err = sql.Open("postgres", connStr)
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		log.Fatal("Database Connection Error:", err)
+		log.Fatal("Unable to connect to READ database:", err)
 	}
-	defer db.Close()
+	if err := db.Ping(); err != nil {
+		log.Fatal("READ database ping failed:", err)
+	}
+	fmt.Println("Successfully connected to PostgreSQL READ database (Enrollment)!")
+	return db
+}
 
-	// 2. เชื่อมต่อ RabbitMQ
+func connectToWriteDB() *sql.DB {
+	host := os.Getenv("DB_WRITE_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	connStr := fmt.Sprintf("user=postgres password=1234 host=%s port=5432 dbname=register sslmode=disable", host)
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatal("Unable to connect to WRITE database:", err)
+	}
+	if err := db.Ping(); err != nil {
+		log.Fatal("WRITE database ping failed:", err)
+	}
+	fmt.Println("Successfully connected to PostgreSQL WRITE database (Enrollment)!")
+	return db
+}
+
+func connectToRabbitMQ() (*amqp.Connection, *amqp.Channel) {
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@localhost:5672/"
 	}
 
-	// Retry connection สำหรับ RabbitMQ (เผื่อตอนสแตนด์บาย container)
+	var rabbitConn *amqp.Connection
+	var err error
 	for i := 0; i < 5; i++ {
 		rabbitConn, err = amqp.Dial(rabbitURL)
 		if err == nil {
@@ -161,100 +171,105 @@ func main() {
 	if err != nil {
 		log.Fatal("RabbitMQ Connection Error:", err)
 	}
-	defer rabbitConn.Close()
 
-	rabbitChannel, err = rabbitConn.Channel()
+	rabbitChannel, err := rabbitConn.Channel()
 	if err != nil {
 		log.Fatal("RabbitMQ Channel Error:", err)
 	}
-	defer rabbitChannel.Close()
 
 	_, err = rabbitChannel.QueueDeclare(queueName, true, false, false, false, nil)
 	if err != nil {
 		log.Fatal("Queue Declaration Error:", err)
 	}
 
-	// 3. ตั้งค่า Circuit Breaker
-	cb = gobreaker.NewCircuitBreaker(gobreaker.Settings{
-		Name:        "enrollment-breaker",
+	return rabbitConn, rabbitChannel
+}
+
+func SetupRouter(dbConns *DBConnections, rabbitChannel *amqp.Channel) *gin.Engine {
+	r := gin.Default()
+
+	r.Use(PrometheusMiddleware())
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	readSettings := gobreaker.Settings{
+		Name:        "Database-Read-Operations",
+		MaxRequests: 3,
+		Interval:    time.Minute,
+		Timeout:     30 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= 5 && failureRatio >= 0.2
+		},
+	}
+	readCircuitBreaker := gobreaker.NewCircuitBreaker(readSettings)
+
+	writeSettings := gobreaker.Settings{
+		Name:        "Database-Write-Operations",
 		MaxRequests: 3,
 		Interval:    5 * time.Second,
 		Timeout:     5 * time.Second,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			return counts.ConsecutiveFailures > 2
 		},
-		OnStateChange: func(name string, from, to gobreaker.State) {
-			log.Printf("Circuit Breaker [%s]: เปลี่ยนสถานะจาก %s เป็น %s", name, from, to)
-		},
-	})
-
-	// 4. เริ่มต้น Worker (Consumer)
-	go startWorker()
-
-	// 5. รัน Gin Web Server
-	r := gin.Default()
-
-	// ใช้งาน Prometheus Middleware
-	r.Use(PrometheusMiddleware())
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-	r.GET("/health", healthHandler)
-	r.POST("/enroll", enrollHandler)
-
-	log.Println("Enrollment Service เริ่มทำงานที่พอร์ต :8002")
-	r.Run(":8002")
-}
-
-// --- Handlers ---
-
-func healthHandler(c *gin.Context) {
-	if err := db.Ping(); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "db_error": err.Error()})
-		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "healthy"})
-}
+	writeCircuitBreaker := gobreaker.NewCircuitBreaker(writeSettings)
 
-func enrollHandler(c *gin.Context) {
-	var req EnrollmentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// ใช้ Circuit Breaker ตรวจสอบเงื่อนไขเบื้องต้นก่อนส่งเข้าคิว
-	_, err := cb.Execute(func() (interface{}, error) {
-		return canEnroll(db, req.StudentID, req.CourseIDs)
-	})
-
-	if err != nil {
-		if err == gobreaker.ErrOpenState {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "ระบบขัดข้องชั่วคราว (Circuit Breaker Open)"})
+	r.GET("/health", func(c *gin.Context) {
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			return nil, dbConns.ReadConn.Ping()
+		})
+		if err != nil {
+			if err == gobreaker.ErrOpenState {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "db_error": "Circuit Breaker Open"})
+				return
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "db_error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// ส่งข้อมูลเข้า RabbitMQ เพื่อประมวลผลต่อ
-	body, _ := json.Marshal(req)
-	err = rabbitChannel.PublishWithContext(context.Background(), "", queueName, false, false, amqp.Publishing{
-		DeliveryMode: amqp.Persistent,
-		ContentType:  "application/json",
-		Body:         body,
+		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 	})
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถส่งข้อมูลเข้าคิวได้"})
-		return
-	}
+	r.POST("/enroll", func(c *gin.Context) {
+		var req EnrollmentRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-	c.JSON(http.StatusAccepted, gin.H{"message": "รับคำขอลงทะเบียนเรียบร้อยแล้ว กำลังดำเนินการ..."})
+		_, err := readCircuitBreaker.Execute(func() (interface{}, error) {
+			return canEnroll(dbConns.ReadConn, req.StudentID, req.CourseIDs)
+		})
+
+		if err != nil {
+			if err == gobreaker.ErrOpenState {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "ระบบขดของชวคราว (Circuit Breaker Open)"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		body, _ := json.Marshal(req)
+		_, err = writeCircuitBreaker.Execute(func() (interface{}, error) {
+			return nil, rabbitChannel.PublishWithContext(context.Background(), "", queueName, false, false, amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Body:         body,
+			})
+		})
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไมสามารถสงขอมลเขาควได"})
+			return
+		}
+
+		c.JSON(http.StatusAccepted, gin.H{"message": "รบคำขอลงทะเบยนเรยบรอยแลว กำลงดำเนนการ..."})
+	})
+
+	return r
 }
 
-// --- Worker & Logic ---
-
-func startWorker() {
+func startWorker(db *sql.DB, rabbitChannel *amqp.Channel) {
 	msgs, err := rabbitChannel.Consume(queueName, "", false, false, false, false, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -264,20 +279,20 @@ func startWorker() {
 		var req EnrollmentRequest
 		json.Unmarshal(d.Body, &req)
 
-		log.Printf("Worker: กำลังประมวลผลการลงทะเบียน นักเรียนรหัส %d", req.StudentID)
+		log.Printf("Worker: กำลงประมวลผลการลงทะเบยน นกเรยนรหส %d", req.StudentID)
 
-		err := processTransaction(req)
+		err := processTransaction(db, req)
 		if err != nil {
 			log.Printf("Worker Error: %v", err)
-			d.Nack(false, true) // ส่งกลับเข้าคิวเพื่อลองใหม่
+			d.Nack(false, true)
 		} else {
-			log.Printf("Worker Success: นักเรียนรหัส %d ลงทะเบียนสำเร็จ", req.StudentID)
+			log.Printf("Worker Success: นกเรยนรหส %d ลงทะเบยนสำเรจ", req.StudentID)
 			d.Ack(false)
 		}
 	}
 }
 
-func processTransaction(req EnrollmentRequest) error {
+func processTransaction(db *sql.DB, req EnrollmentRequest) error {
 	courses, err := canEnroll(db, req.StudentID, req.CourseIDs)
 	if err != nil {
 		return err
@@ -319,10 +334,34 @@ func processTransaction(req EnrollmentRequest) error {
 }
 
 func canEnroll(db *sql.DB, studentID int, ids []int) ([]CourseDB, error) {
-	// จำลอง Logic การตรวจสอบ (ควร Query จริงจาก DB)
 	var results []CourseDB
 	for _, id := range ids {
 		results = append(results, CourseDB{ID: id, Capacity: 30, State: "open"})
 	}
 	return results, nil
+}
+
+func main() {
+	registerConsul("enrollment-service", 8002)
+
+	readConn := connectToReadDB()
+	writeConn := connectToWriteDB()
+	defer readConn.Close()
+	defer writeConn.Close()
+
+	dbConns := &DBConnections{
+		ReadConn:  readConn,
+		WriteConn: writeConn,
+	}
+
+	rabbitConn, rabbitChannel := connectToRabbitMQ()
+	defer rabbitConn.Close()
+	defer rabbitChannel.Close()
+
+	go startWorker(dbConns.WriteConn, rabbitChannel)
+
+	r := SetupRouter(dbConns, rabbitChannel)
+
+	log.Println("Enrollment Service เรมทำงานทพอรต :8002")
+	r.Run(":8002")
 }

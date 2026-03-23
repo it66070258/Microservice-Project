@@ -44,7 +44,8 @@
       dockerfile: dockerfile
     container_name: enrollment-service
     environment:
-      DB_HOST: postgres
+      DB_READ_HOST: postgres
+      DB_WRITE_HOST: postgres
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
     ports:
       - "8002:8002"
