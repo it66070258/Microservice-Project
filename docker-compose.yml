@@ -78,7 +78,8 @@
       dockerfile: dockerfile
     container_name: student-service
     environment:
-      DB_HOST: postgres
+      DB_READ_HOST: postgres
+      DB_WRITE_HOST: postgres
     ports:
       - "8001:8001"
     networks:
